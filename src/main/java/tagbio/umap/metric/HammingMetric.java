@@ -19,12 +19,28 @@ public final class HammingMetric extends Metric {
 
   @Override
   public float distance(final float[] x, final float[] y) {
-    float result = 0;
-    for (int i = 0; i < x.length; ++i) {
+    int mismatches = 0;
+    int i = 0;
+    final int limit = x.length - 3;
+    for (; i < limit; i += 4) {
       if (x[i] != y[i]) {
-        ++result;
+        ++mismatches;
+      }
+      if (x[i + 1] != y[i + 1]) {
+        ++mismatches;
+      }
+      if (x[i + 2] != y[i + 2]) {
+        ++mismatches;
+      }
+      if (x[i + 3] != y[i + 3]) {
+        ++mismatches;
       }
     }
-    return result / x.length;
+    for (; i < x.length; ++i) {
+      if (x[i] != y[i]) {
+        ++mismatches;
+      }
+    }
+    return mismatches / (float) x.length;
   }
 }
