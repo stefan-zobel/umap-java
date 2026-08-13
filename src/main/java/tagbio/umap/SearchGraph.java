@@ -5,8 +5,7 @@
  */
 package tagbio.umap;
 
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.Arrays;
 
 /**
  * Stores unordered pairs.
@@ -15,14 +14,42 @@ import java.util.TreeSet;
  */
 class SearchGraph {
 
-  private final TreeSet<Integer>[] mRows;
+  private static final int INITIAL_ROW_CAPACITY = 8;
 
-  @SuppressWarnings("unchecked")
+  private final int[][] mRows;
+  private final int[] mSizes;
+
   SearchGraph(final int rows) {
-    mRows = (TreeSet<Integer>[]) new TreeSet[rows];
+    mRows = new int[rows][];
+    mSizes = new int[rows];
     for (int k = 0; k < rows; ++k) {
-      mRows[k] = new TreeSet<>();
+      mRows[k] = new int[INITIAL_ROW_CAPACITY];
+      Arrays.fill(mRows[k], -1);
     }
+  }
+
+  private static boolean contains(final int[] row, final int size, final int value) {
+    for (int i = 0; i < size; ++i) {
+      if (row[i] == value) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void appendUnique(final int row, final int value) {
+    int[] values = mRows[row];
+    final int size = mSizes[row];
+    if (contains(values, size, value)) {
+      return;
+    }
+    if (size == values.length) {
+      values = Arrays.copyOf(values, values.length << 1);
+      Arrays.fill(values, size, values.length, -1);
+      mRows[row] = values;
+    }
+    values[size] = value;
+    mSizes[row] = size + 1;
   }
 
   /**
@@ -31,16 +58,20 @@ class SearchGraph {
    * @param y instance index
    */
   void set(final int x, final int y) {
-    mRows[x].add(y);
-    mRows[y].add(x);
+    appendUnique(x, y);
+    appendUnique(y, x);
   }
 
   /**
-   * Set of indices for an instance.
+   * Adjacency indices for an instance.
    * @param row instance number
-   * @return set of instance numbers
+   * @return backing adjacency array
    */
-  Set<Integer> row(final int row) {
+  int[] row(final int row) {
     return mRows[row];
+  }
+
+  int rowSize(final int row) {
+    return mSizes[row];
   }
 }

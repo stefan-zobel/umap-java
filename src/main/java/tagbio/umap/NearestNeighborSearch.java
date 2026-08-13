@@ -5,9 +5,8 @@
  */
 package tagbio.umap;
 
+import java.util.Arrays;
 import java.util.Random;
-import java.util.Set;
-import java.util.TreeSet;
 
 import tagbio.umap.metric.Metric;
 
@@ -49,12 +48,21 @@ class NearestNeighborSearch {
   }
 
   Heap initializedNndSearch(final Matrix data, final SearchGraph searchGraph, Heap initialization, final Matrix queryPoints) {
+    final int[] visited = new int[data.rows()];
+    int stamp = 1;
     for (int i = 0; i < queryPoints.rows(); ++i) {
-
-      final Set<Integer> tried = new TreeSet<>();
-      for (final int t : initialization.indices()[i]) {
-        tried.add(t);
+      if (stamp == Integer.MAX_VALUE) {
+        Arrays.fill(visited, 0);
+        stamp = 1;
       }
+
+      for (final int t : initialization.indices()[i]) {
+        if (t >= 0) {
+          visited[t] = stamp;
+        }
+      }
+
+      final float[] queryRow = queryPoints.row(i);
 
       while (true) {
 
@@ -64,15 +72,19 @@ class NearestNeighborSearch {
         if (vertex == -1) {
           break;
         }
-        for (final int candidate : searchGraph.row(vertex)) {
-          if (candidate == vertex || candidate == -1 || tried.contains(candidate)) {
+        final int[] neighbors = searchGraph.row(vertex);
+        final int degree = searchGraph.rowSize(vertex);
+        for (int n = 0; n < degree; ++n) {
+          final int candidate = neighbors[n];
+          if (candidate == vertex || candidate < 0 || visited[candidate] == stamp) {
             continue;
           }
-          final float d = mDist.distance(data.row(candidate), queryPoints.row(i));
+          final float d = mDist.distance(data.row(candidate), queryRow);
           initialization.uncheckedHeapPush(i, d, candidate, true);
-          tried.add(candidate);
+          visited[candidate] = stamp;
         }
       }
+      ++stamp;
     }
 
     return initialization;
