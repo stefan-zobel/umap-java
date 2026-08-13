@@ -57,14 +57,17 @@ class ParallelNearestNeighborDescent extends  NearestNeighborDescent {
 
       final int jobs = (int)(mThreads * (1 + MathUtils.log2(mThreads)));
       final int chunkSize = (nVertices + jobs - 1) / jobs;
+      // Avoid shared Random contention by giving each parallel job its own RNG stream.
+      final Random[] randoms = Utils.splitRandom(random, jobs);
 
       for (int t = 0; t < jobs; ++t) {
         final int lo = t * chunkSize;
         final int hi = Math.min((t + 1) * chunkSize, nVertices);
+        final Random jobRandom = randoms[t];
         futures.add(executor.submit(() -> {
           for (int i = lo; i < hi; ++i) {
             final float[] iRow = data.row(i);
-            for (final int index : Utils.rejectionSample(nNeighbors, data.rows(), random)) {
+            for (final int index : Utils.rejectionSample(nNeighbors, data.rows(), jobRandom)) {
               final float d = mMetric.distance(iRow, data.row(index));
               currentGraph.push(i, d, index, true);
               currentGraph.push(index, d, i, true);
@@ -110,12 +113,13 @@ class ParallelNearestNeighborDescent extends  NearestNeighborDescent {
         for (int t = 0; t < jobs; ++t) {
           final int lo = t * chunkSize;
           final int hi = Math.min((t + 1) * chunkSize, nVertices);
+          final Random jobRandom = randoms[t];
           futures.add(executor.submit(() -> {
             final boolean[] rejectStatus = new boolean[maxCandidates];
             int c = 0;
             for (int i = lo; i < hi; ++i) {
               for (int j = 0; j < maxCandidates; ++j) {
-                rejectStatus[j] = random.nextFloat() < rho;
+                rejectStatus[j] = jobRandom.nextFloat() < rho;
               }
 
               for (int j = 0; j < maxCandidates; ++j) {
