@@ -24,10 +24,11 @@ public final class SokalSneathMetric extends Metric {
     for (int i = 0; i < x.length; ++i) {
       final boolean xTrue = x[i] != 0;
       final boolean yTrue = y[i] != 0;
-      if (xTrue && yTrue) {
-        ++numTrueTrue;
-      }
-      if (xTrue != yTrue) {
+      if (xTrue == yTrue) {
+        if (xTrue) {
+          ++numTrueTrue;
+        }
+      } else {
         ++numNotEqual;
       }
     }

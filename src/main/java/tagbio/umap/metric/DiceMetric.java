@@ -25,14 +25,14 @@ public final class DiceMetric extends Metric {
     for (int i = 0; i < x.length; ++i) {
       final boolean xTrue = x[i] != 0;
       final boolean yTrue = y[i] != 0;
-      numTrueTrue += xTrue && yTrue ? 1 : 0;
-      numNotEqual += xTrue != yTrue ? 1 : 0;
+      if (xTrue == yTrue) {
+        if (xTrue) {
+          ++numTrueTrue;
+        }
+      } else {
+        ++numNotEqual;
+      }
     }
-
-    if (numNotEqual == 0) {
-      return 0;
-    } else {
-      return numNotEqual / (float) (2 * numTrueTrue + numNotEqual);
-    }
+    return numNotEqual == 0 ? 0 : numNotEqual / (float) (2 * numTrueTrue + numNotEqual);
   }
 }

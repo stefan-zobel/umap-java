@@ -20,19 +20,18 @@ public final class JaccardMetric extends Metric {
 
   @Override
   public float distance(final float[] x, final float[] y) {
-     int numNonZero = 0;
-     int numEqual = 0;
-     for (int i = 0; i < x.length; ++i) {
-       final boolean xTrue = x[i] != 0;
-       final boolean yTrue = y[i] != 0;
-       numNonZero += xTrue || yTrue ? 1 : 0;
-       numEqual += xTrue && yTrue ? 1 : 0;
-     }
-
-     if (numNonZero == 0) {
-       return 0;
-     } else {
-       return (numNonZero - numEqual) / (float) numNonZero;
-     }
+    int numNonZero = 0;
+    int numTrueTrue = 0;
+    for (int i = 0; i < x.length; ++i) {
+      final boolean xTrue = x[i] != 0;
+      final boolean yTrue = y[i] != 0;
+      if (xTrue | yTrue) {
+        ++numNonZero;
+        if (xTrue & yTrue) {
+          ++numTrueTrue;
+        }
+      }
+    }
+    return numNonZero == 0 ? 0 : (numNonZero - numTrueTrue) / (float) numNonZero;
   }
 }

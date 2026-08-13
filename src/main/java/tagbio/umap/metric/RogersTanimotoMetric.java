@@ -21,9 +21,7 @@ public class RogersTanimotoMetric extends Metric {
   public float distance(final float[] x, final float[] y) {
     int numNotEqual = 0;
     for (int i = 0; i < x.length; ++i) {
-      final boolean xTrue = x[i] != 0;
-      final boolean yTrue = y[i] != 0;
-      if (xTrue != yTrue) {
+      if ((x[i] != 0) != (y[i] != 0)) {
         ++numNotEqual;
       }
     }
