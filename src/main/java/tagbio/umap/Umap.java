@@ -448,6 +448,7 @@ public class Umap {
 
     final int dim = headEmbedding.cols();
     final boolean moveOther = headEmbedding.rows() == tailEmbedding.rows();
+    final boolean bIsOne = Math.abs(b - 1.0F) < 1e-6F;
     float alpha = initialAlpha;
 
     final float[] epochsPerNegativeSample = MathUtils.divide(epochsPerSample, negativeSampleRate);
@@ -468,7 +469,8 @@ public class Umap {
 
           float gradCoeff;
           if (distSquared > 0.0) {
-            gradCoeff = (float) ((-2.0 * a * b * Math.pow(distSquared, b - 1.0)) / (a * Math.pow(distSquared, b) + 1.0));
+            final double distPowB = bIsOne ? distSquared : Math.pow(distSquared, b);
+            gradCoeff = (float) ((-2.0 * a * b * distPowB) / (distSquared * (a * distPowB + 1.0)));
           } else {
             gradCoeff = 0;
           }
@@ -491,7 +493,8 @@ public class Umap {
             distSquared = ReducedEuclideanMetric.SINGLETON.distance(current, other);
 
             if (distSquared > 0) {
-              gradCoeff = 2.0F * gamma * b / (float) ((0.001 + distSquared) * (a * Math.pow(distSquared, b) + 1));
+              final double distPowB = bIsOne ? distSquared : Math.pow(distSquared, b);
+              gradCoeff = 2.0F * gamma * b / (float) ((0.001 + distSquared) * (a * distPowB + 1.0));
             } else if (j == kr) {
               continue;
             } else {
