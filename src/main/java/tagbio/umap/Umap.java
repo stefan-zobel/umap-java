@@ -1283,12 +1283,21 @@ public class Umap {
     final float[][] dists;
     if (mSmallData) {
       final Matrix distanceMatrix = PairwiseDistances.pairwiseDistances(instances, mRawData, mMetric);
-      indices = new int[distanceMatrix.rows()][];
-      for (int k = 0; k < distanceMatrix.rows(); ++k) {
-        indices[k] = MathUtils.argsort(Arrays.copyOf(distanceMatrix.row(k), distanceMatrix.cols()));
+      final int nRows = distanceMatrix.rows();
+      final int nCols = distanceMatrix.cols();
+      indices = new int[nRows][mRunNNeighbors];
+      dists = new float[nRows][mRunNNeighbors];
+      for (int k = 0; k < nRows; ++k) {
+        final float[] distanceRow = distanceMatrix.row(k);
+        final int[] sorted = MathUtils.argsort(Arrays.copyOf(distanceRow, nCols));
+        final int[] idxRow = indices[k];
+        final float[] distRow = dists[k];
+        for (int j = 0; j < mRunNNeighbors; ++j) {
+          final int idx = sorted[j];
+          idxRow[j] = idx;
+          distRow[j] = distanceRow[idx];
+        }
       }
-      indices = MathUtils.subarray(indices, mRunNNeighbors);
-      dists = Utils.submatrix(distanceMatrix, indices, mRunNNeighbors);
     } else {
       final Heap init = NearestNeighborDescent.initialiseSearch(mRpForest, mRawData, instances, (int) (mRunNNeighbors * mTransformQueueSize), mSearch, mRandom);
       if (mSearchGraph == null) {
