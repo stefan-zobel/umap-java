@@ -6,12 +6,8 @@
 package tagbio.umap;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
 
 import junit.framework.TestCase;
-import tagbio.umap.metric.PrecomputedMetric;
 
 class Heyler10gbData extends Data {
   public Heyler10gbData() throws IOException {
@@ -62,7 +58,7 @@ public class HeylerTest extends TestCase {
     final float[][] d = data.getData();
     Utils.message("Loading 10gb data complete.");
     final long start = System.currentTimeMillis();
-    final float[][] matrix = umap.fitTransform(d);
+    final float[][] _ = umap.fitTransform(d);
     Utils.message("UMAP time: " + Math.round((System.currentTimeMillis() - start) / 1000.0) + " s");
   }
 
@@ -75,7 +71,7 @@ public class HeylerTest extends TestCase {
     final float[][] d = data.getData();
     Utils.message("Loading 20gb data complete.");
     final long start = System.currentTimeMillis();
-    final float[][] matrix = umap.fitTransform(d);
+    final float[][] _ = umap.fitTransform(d);
     Utils.message("UMAP time: " + Math.round((System.currentTimeMillis() - start) / 2000.0) + " s");
   }
 
@@ -88,7 +84,7 @@ public class HeylerTest extends TestCase {
     final float[][] d = data.getData();
     Utils.message("Loading 30gb data complete.");
     final long start = System.currentTimeMillis();
-    final float[][] matrix = umap.fitTransform(d);
+    final float[][] _ = umap.fitTransform(d);
     Utils.message("UMAP time: " + Math.round((System.currentTimeMillis() - start) / 3000.0) + " s");
   }
 }

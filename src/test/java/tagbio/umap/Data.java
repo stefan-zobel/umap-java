@@ -60,7 +60,7 @@ abstract class Data {
       try (final Scanner rowScanner = new Scanner(line)) {
         rowScanner.useDelimiter(delimiter);
         if (rowScanner.hasNext()) {
-          final String next = rowScanner.next();
+          final String _ = rowScanner.next();
           //assert "sample".equals(next);
         }
         while (rowScanner.hasNext()) {

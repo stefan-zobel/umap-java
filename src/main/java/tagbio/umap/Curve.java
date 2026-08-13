@@ -77,10 +77,13 @@ final class Curve {
   }
 
 
+  /*
   private static double curve(final float x, final float a, final float b) {
     return 1.0 / (1.0 + a * Math.pow(x, 2 * b));
   }
+  */
 
+  /*
   private static float[] wrapCurve(final float[] x, final float[] y, final float a, final float b) {
     final float[] res = new float[x.length];
     for (int i = 0; i < x.length; i++) {
@@ -88,6 +91,7 @@ final class Curve {
     }
     return res;
   }
+  */
 
 
   //        def curve_fit(f, xdata, ydata, p0=None, sigma=None, absolute_sigma=False,
@@ -521,6 +525,7 @@ final class Curve {
 //      return null;
 //    }
 
+  /*
   private static void checkValues(float[] data) {
     if (data.length == 0) {
       throw new IllegalArgumentException("Array must not be empty.");
@@ -531,5 +536,6 @@ final class Curve {
       }
     }
   }
+  */
 }
 
