@@ -58,6 +58,7 @@ public class Umap {
    */
   private static float[][] smoothKnnDist(final float[][] distances, final float k, final int nIter, final int localConnectivity, final float bandwidth) {
     final float target = (float) (MathUtils.log2(k) * bandwidth);
+    final int nNeighbors = distances[0].length;
     final float[] rho = new float[distances.length];
     final float[] result = new float[distances.length];
 
@@ -69,26 +70,36 @@ public class Umap {
       float mid = 1;
 
       final float[] ithDistances = distances[i];
-      final float[] nonZeroDists = MathUtils.filterPositive(ithDistances);
-      if (nonZeroDists.length >= localConnectivity) {
+      int firstPositive = -1;
+      float ithDistanceSum = 0.0F;
+      for (int j = 0; j < nNeighbors; ++j) {
+        final float v = ithDistances[j];
+        ithDistanceSum += v;
+        if (firstPositive < 0 && v > 0) {
+          firstPositive = j;
+        }
+      }
+      final int nonZeroLength = firstPositive < 0 ? 0 : nNeighbors - firstPositive;
+      if (nonZeroLength >= localConnectivity) {
         final int index = (int) Math.floor(localConnectivity);
         final float interpolation = localConnectivity - index;
         if (index > 0) {
-          rho[i] = nonZeroDists[index - 1];
+          final int base = firstPositive + index - 1;
+          rho[i] = ithDistances[base];
           if (interpolation > SMOOTH_K_TOLERANCE) {
-            rho[i] += interpolation * (nonZeroDists[index] - nonZeroDists[index - 1]);
+            rho[i] += interpolation * (ithDistances[base + 1] - ithDistances[base]);
           }
         } else {
-          rho[i] = interpolation * nonZeroDists[0];
+          rho[i] = interpolation * ithDistances[firstPositive];
         }
-      } else if (nonZeroDists.length > 0) {
-        rho[i] = MathUtils.max(nonZeroDists);
+      } else if (nonZeroLength > 0) {
+        rho[i] = ithDistances[nNeighbors - 1];
       }
 
       for (int n = 0; n < nIter; ++n) {
         double pSum = 0.0;
-        for (int j = 1; j < distances[0].length; ++j) {
-          final double d = distances[i][j] - rho[i];
+        for (int j = 1; j < nNeighbors; ++j) {
+          final double d = ithDistances[j] - rho[i];
           pSum += d > 0 ? Math.exp(-(d / mid)) : 1;
         }
 
@@ -112,7 +123,7 @@ public class Umap {
       result[i] = mid;
 
       if (rho[i] > 0) {
-        final float meanIthDistances = MathUtils.mean(ithDistances);
+        final float meanIthDistances = ithDistanceSum / nNeighbors;
         if (result[i] < MIN_K_DIST_SCALE * meanIthDistances) {
           result[i] = MIN_K_DIST_SCALE * meanIthDistances;
         }
