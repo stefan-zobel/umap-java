@@ -20,6 +20,76 @@ class CooMatrix extends Matrix {
   private final int[] mCol;
   private final float[] mData;
 
+  // Sentinel for empty slots in the primitive coordinate hash index.
+  private static final long EMPTY_KEY = Long.MIN_VALUE;
+
+  private static final class CoordinateIndex {
+    private final long[] mKeys;
+    private final int[] mValues;
+    private final int mMask;
+
+    private CoordinateIndex(final long[] keys, final int[] values, final int mask) {
+      mKeys = keys;
+      mValues = values;
+      mMask = mask;
+    }
+
+    private static int tableSizeFor(final int required) {
+      int n = 1;
+      while (n < required) {
+        n <<= 1;
+      }
+      return n;
+    }
+
+    private static int mix(final long key) {
+      long z = key;
+      z ^= z >>> 33;
+      z *= 0xff51afd7ed558ccdL;
+      z ^= z >>> 33;
+      z *= 0xc4ceb9fe1a85ec53L;
+      z ^= z >>> 33;
+      return (int) z;
+    }
+
+    private static long pack(final int row, final int col) {
+      return ((long) row << 32) | (col & 0xffffffffL);
+    }
+
+    static CoordinateIndex build(final int[] rows, final int[] cols) {
+      final int size = tableSizeFor(Math.max(2, rows.length << 1));
+      final long[] keys = new long[size];
+      final int[] values = new int[size];
+      Arrays.fill(keys, EMPTY_KEY);
+      final int mask = size - 1;
+      for (int i = 0; i < rows.length; ++i) {
+        final long key = pack(rows[i], cols[i]);
+        int pos = mix(key) & mask;
+        while (keys[pos] != EMPTY_KEY) {
+          pos = (pos + 1) & mask;
+        }
+        keys[pos] = key;
+        values[pos] = i + 1;
+      }
+      return new CoordinateIndex(keys, values, mask);
+    }
+
+    int find(final int row, final int col) {
+      final long key = pack(row, col);
+      int pos = mix(key) & mMask;
+      while (true) {
+        final long k = mKeys[pos];
+        if (k == EMPTY_KEY) {
+          return -1;
+        }
+        if (k == key) {
+          return mValues[pos] - 1;
+        }
+        pos = (pos + 1) & mMask;
+      }
+    }
+  }
+
   private static CooMatrix createWithTruncate(final float[] d, final int[] r, final int[] c, final int rows, final int cols, final int len) {
     return len == r.length
       ? new CooMatrix(d, r, c, rows, cols)
@@ -464,14 +534,16 @@ class CooMatrix extends Matrix {
     if (rows() != cols()) {
       throw new IllegalArgumentException("Incompatible matrix sizes");
     }
+    final CoordinateIndex index = CoordinateIndex.build(mRow, mCol);
     // This product cannot have more non-zero entries than the input
     final int[] r = new int[mRow.length];
     final int[] c = new int[mCol.length];
     final float[] d = new float[mData.length];
     int j = 0;
     for (int k = 0; k < mRow.length; ++k) {
-      final float v = mData[k] * get(mCol[k], mRow[k]);
-      if (v != 0) {
+      final int transposeIndex = index.find(mCol[k], mRow[k]);
+      if (transposeIndex >= 0) {
+        final float v = mData[k] * mData[transposeIndex];
         r[j] = mRow[k];
         c[j] = mCol[k];
         d[j++] = v;
@@ -485,6 +557,7 @@ class CooMatrix extends Matrix {
     if (rows() != cols()) {
       throw new IllegalArgumentException("Incompatible matrix sizes");
     }
+    final CoordinateIndex index = CoordinateIndex.build(mRow, mCol);
     final int maxNonZero = getMaxNonZeroSize();
     final int[] r = new int[maxNonZero];
     final int[] c = new int[maxNonZero];
@@ -493,13 +566,14 @@ class CooMatrix extends Matrix {
     for (int k = 0; k < mRow.length; ++k) {
       final int rk = mRow[k];
       final int ck = mCol[k];
-      final float tk = get(ck, rk);
+      final int transposeIndex = index.find(ck, rk);
+      final float tk = transposeIndex >= 0 ? mData[transposeIndex] : 0;
       final float v = mData[k] + tk;
       if (v != 0) {
         r[j] = rk;
         c[j] = ck;
         d[j++] = v;
-        if (rk != ck && tk == 0) {
+        if (rk != ck && transposeIndex < 0) {
           r[j] = ck;
           c[j] = rk;
           d[j++] = v;
