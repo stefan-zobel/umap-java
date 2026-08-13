@@ -57,12 +57,27 @@ public class Umap {
    * The distance to the first nearest neighbor for each point.
    */
   private static float[][] smoothKnnDist(final float[][] distances, final float k, final int nIter, final int localConnectivity, final float bandwidth) {
+    return smoothKnnDist(distances, distances[0].length, k, nIter, localConnectivity, bandwidth);
+  }
+
+  private static float meanPrefix(final float[][] distances, final int nNeighbors) {
+    float sum = 0.0F;
+    long count = 0;
+    for (final float[] row : distances) {
+      for (int j = 0; j < nNeighbors; ++j) {
+        sum += row[j];
+      }
+      count += nNeighbors;
+    }
+    return sum / count;
+  }
+
+  private static float[][] smoothKnnDist(final float[][] distances, final int nNeighbors, final float k, final int nIter, final int localConnectivity, final float bandwidth) {
     final float target = (float) (MathUtils.log2(k) * bandwidth);
-    final int nNeighbors = distances[0].length;
     final float[] rho = new float[distances.length];
     final float[] result = new float[distances.length];
 
-    final float meanDistances = MathUtils.mean(distances);
+    final float meanDistances = meanPrefix(distances, nNeighbors);
 
     for (int i = 0; i < distances.length; ++i) {
       float lo = 0;
@@ -138,6 +153,10 @@ public class Umap {
 
   static float[][] smoothKnnDist(final float[][] distances, final float k, final int localConnectivity) {
     return smoothKnnDist(distances, k, 64, localConnectivity, 1.0F);
+  }
+
+  static float[][] smoothKnnDist(final float[][] distances, final int nNeighbors, final float k, final int localConnectivity) {
+    return smoothKnnDist(distances, nNeighbors, k, 64, localConnectivity, 1.0F);
   }
 
   /**
@@ -264,8 +283,11 @@ public class Umap {
    * @return sparse matrix of shape <code>(nSamples, nNeighbors)</code>
    */
   static CooMatrix computeMembershipStrengths(final int[][] knnIndices, final float[][] knnDists, final float[] sigmas, final float[] rhos, final int rowCount, final int colCount) {
+    return computeMembershipStrengths(knnIndices, knnDists, knnIndices[0].length, sigmas, rhos, rowCount, colCount);
+  }
+
+  static CooMatrix computeMembershipStrengths(final int[][] knnIndices, final float[][] knnDists, final int nNeighbors, final float[] sigmas, final float[] rhos, final int rowCount, final int colCount) {
     final int nSamples = knnIndices.length;
-    final int nNeighbors = knnIndices[0].length;
     final int size = nSamples * nNeighbors;
 
     final int[] rows = new int[size];
@@ -1281,18 +1303,19 @@ public class Umap {
 
     int[][] indices;
     final float[][] dists;
+    final int nNeighbors = mRunNNeighbors;
     if (mSmallData) {
       final Matrix distanceMatrix = PairwiseDistances.pairwiseDistances(instances, mRawData, mMetric);
       final int nRows = distanceMatrix.rows();
       final int nCols = distanceMatrix.cols();
-      indices = new int[nRows][mRunNNeighbors];
-      dists = new float[nRows][mRunNNeighbors];
+      indices = new int[nRows][nNeighbors];
+      dists = new float[nRows][nNeighbors];
       for (int k = 0; k < nRows; ++k) {
         final float[] distanceRow = distanceMatrix.row(k);
         final int[] sorted = MathUtils.argsort(Arrays.copyOf(distanceRow, nCols));
         final int[] idxRow = indices[k];
         final float[] distRow = dists[k];
-        for (int j = 0; j < mRunNNeighbors; ++j) {
+        for (int j = 0; j < nNeighbors; ++j) {
           final int idx = sorted[j];
           idxRow[j] = idx;
           distRow[j] = distanceRow[idx];
@@ -1311,17 +1334,17 @@ public class Umap {
         }
       }
       final Heap result = mSearch.initializedNndSearch(mRawData, mSearchGraph, init, instances).deheapSort();
-      indices = MathUtils.subarray(result.indices(), mRunNNeighbors);
-      dists = MathUtils.subarray(result.weights(), mRunNNeighbors);
+      indices = result.indices();
+      dists = result.weights();
     }
 
     UmapProgress.update();
 
     final int adjustedLocalConnectivity = Math.max(0, mLocalConnectivity - 1);
-    final float[][] sigmasRhos = smoothKnnDist(dists, mRunNNeighbors, adjustedLocalConnectivity);
+    final float[][] sigmasRhos = smoothKnnDist(dists, nNeighbors, nNeighbors, adjustedLocalConnectivity);
     final float[] sigmas = sigmasRhos[0];
     final float[] rhos = sigmasRhos[1];
-    CooMatrix graph = computeMembershipStrengths(indices, dists, sigmas, rhos, instances.rows(), mRawData.rows());
+    CooMatrix graph = computeMembershipStrengths(indices, dists, nNeighbors, sigmas, rhos, instances.rows(), mRawData.rows());
 
     UmapProgress.update();
 
