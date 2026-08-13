@@ -594,14 +594,28 @@ class CooMatrix extends Matrix {
     }
     final int rows = rows();
     final int cols = m.cols();
+    final int rightRows = a.rows();
+
+    // Build CSR-style row boundaries for the right COO matrix once.
+    final int[] rightRowStart = new int[rightRows + 1];
+    int rp = 0;
+    for (int r = 0; r < rightRows; ++r) {
+      rightRowStart[r] = rp;
+      while (rp < a.mRow.length && a.mRow[rp] == r) {
+        ++rp;
+      }
+    }
+    rightRowStart[rightRows] = rp;
+
     final float[][] res = new float[rows][cols];
     for (int k = 0; k < mData.length; ++k) {
-      final int r = mRow[k];
-      final int c = mCol[k];
-      for (int j = 0; j < a.mData.length; ++j) {
-        if (a.mRow[j] == c) {
-          res[r][a.mCol[j]] += mData[k] * a.mData[j];
-        }
+      final int leftRow = mRow[k];
+      final int leftCol = mCol[k];
+      final float leftVal = mData[k];
+      final int start = rightRowStart[leftCol];
+      final int end = rightRowStart[leftCol + 1];
+      for (int j = start; j < end; ++j) {
+        res[leftRow][a.mCol[j]] += leftVal * a.mData[j];
       }
     }
     return new DefaultMatrix(res).toCoo();
