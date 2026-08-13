@@ -25,10 +25,16 @@ public class PairwiseDistances {
     }
     final int n = x.rows();
     final float[][] distances = new float[n][n];
+    final float[][] rows = new float[n][];
+    for (int i = 0; i < n; ++i) {
+      rows[i] = x.row(i);
+    }
     for (int k = 0; k < n; ++k) {
-      final float[] xk = x.row(k);
-      for (int j = 0; j < n; ++j) {
-        distances[k][j] = metric.distance(xk, x.row(j));
+      final float[] xk = rows[k];
+      for (int j = k; j < n; ++j) {
+        final float d = metric.distance(xk, rows[j]);
+        distances[k][j] = d;
+        distances[j][k] = d;
       }
     }
     return new DefaultMatrix(distances);
@@ -41,10 +47,18 @@ public class PairwiseDistances {
     final int xn = x.rows();
     final int yn = y.rows();
     final float[][] distances = new float[xn][yn];
+    final float[][] xRows = new float[xn][];
+    final float[][] yRows = new float[yn][];
+    for (int i = 0; i < xn; ++i) {
+      xRows[i] = x.row(i);
+    }
+    for (int j = 0; j < yn; ++j) {
+      yRows[j] = y.row(j);
+    }
     for (int k = 0; k < xn; ++k) {
-      final float[] xk = x.row(k);
+      final float[] xk = xRows[k];
       for (int j = 0; j < yn; ++j) {
-        distances[k][j] = metric.distance(xk, y.row(j));
+        distances[k][j] = metric.distance(xk, yRows[j]);
       }
     }
     return new DefaultMatrix(distances);
