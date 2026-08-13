@@ -52,9 +52,11 @@ final class RandomProjectionTree {
     }
     final int left = indices[leftIndex];
     final int right = indices[rightIndex];
+    final float[] leftRow = data.row(left);
+    final float[] rightRow = data.row(right);
 
-    float leftNorm = Utils.norm(data.row(left));
-    float rightNorm = Utils.norm(data.row(right));
+    float leftNorm = Utils.norm(leftRow);
+    float rightNorm = Utils.norm(rightRow);
 
     if (Math.abs(leftNorm) < EPS) {
       leftNorm = 1;
@@ -68,7 +70,7 @@ final class RandomProjectionTree {
     final float[] hyperplaneVector = new float[dim];
 
     for (int d = 0; d < dim; ++d) {
-      hyperplaneVector[d] = (data.get(left, d) / leftNorm) - (data.get(right, d) / rightNorm);
+      hyperplaneVector[d] = (leftRow[d] / leftNorm) - (rightRow[d] / rightNorm);
     }
 
     float hyperplaneNorm = Utils.norm(hyperplaneVector);
@@ -87,9 +89,10 @@ final class RandomProjectionTree {
     int nRight = 0;
     final boolean[] side = new boolean[indices.length];
     for (int i = 0; i < indices.length; ++i) {
+      final float[] pointRow = data.row(indices[i]);
       float margin = 0;
       for (int d = 0; d < dim; ++d) {
-        margin += hyperplaneVector[d] * data.get(indices[i], d);
+        margin += hyperplaneVector[d] * pointRow[d];
       }
 
       if (Math.abs(margin) < EPS) {
@@ -153,6 +156,8 @@ final class RandomProjectionTree {
     }
     final int left = indices[leftIndex];
     final int right = indices[rightIndex];
+    final float[] leftRow = data.row(left);
+    final float[] rightRow = data.row(right);
 
     // Compute the normal vector to the hyperplane (the vector between the two points) and the offset from the origin
     float hyperplaneOffset = 0;
@@ -160,8 +165,8 @@ final class RandomProjectionTree {
 
     // todo what is the matrix type here?  Getting multiple values from same row ...
     for (int d = 0; d < dim; ++d) {
-      final float ld = data.get(left, d);
-      final float rd = data.get(right, d);
+      final float ld = leftRow[d];
+      final float rd = rightRow[d];
       final float delta = ld - rd;
       hyperplaneVector[d] = delta;
       hyperplaneOffset -= delta * (ld + rd);
@@ -175,9 +180,10 @@ final class RandomProjectionTree {
     int nRight = 0;
     final boolean[] side = new boolean[indices.length];
     for (int i = 0; i < indices.length; ++i) {
+      final float[] pointRow = data.row(indices[i]);
       float margin = hyperplaneOffset;
       for (int d = 0; d < dim; ++d) {
-        margin += hyperplaneVector[d] * data.get(indices[i], d);
+        margin += hyperplaneVector[d] * pointRow[d];
       }
       if (margin >= EPS) {
         //side[i] = false;

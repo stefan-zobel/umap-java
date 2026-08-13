@@ -39,11 +39,15 @@ class NearestNeighborDescent {
 
   Heap descent(final Matrix data, final int nNeighbors, final Random random, final int maxCandidates, final boolean rpTreeInit, final int nIters, final List<FlatTree> forest, final float delta, final float rho) {
     final int nVertices = data.rows();
+    final float[][] rows = new float[nVertices][];
+    for (int i = 0; i < nVertices; ++i) {
+      rows[i] = data.row(i);
+    }
     final Heap currentGraph = new Heap(data.rows(), nNeighbors);
-    for (int i = 0; i < data.rows(); ++i) {
-      final float[] iRow = data.row(i);
-      for (final int index : Utils.rejectionSample(nNeighbors, data.rows(), random)) {
-        final float d = mMetric.distance(iRow, data.row(index));
+    for (int i = 0; i < nVertices; ++i) {
+      final float[] iRow = rows[i];
+      for (final int index : Utils.rejectionSample(nNeighbors, nVertices, random)) {
+        final float d = mMetric.distance(iRow, rows[index]);
         currentGraph.push(i, d, index, true);
         currentGraph.push(index, d, i, true);
       }
@@ -54,9 +58,9 @@ class NearestNeighborDescent {
       for (final FlatTree tree : forest) {
         for (final int[] leaf : tree.getIndices()) {
           for (int i = 0; i < leaf.length; ++i) {
-            final float[] iRow = data.row(leaf[i]);
+            final float[] iRow = rows[leaf[i]];
             for (int j = i + 1; j < leaf.length; ++j) {
-              final float d = mMetric.distance(iRow, data.row(leaf[j]));
+              final float d = mMetric.distance(iRow, rows[leaf[j]]);
               currentGraph.push(leaf[i], d, leaf[j], true);
               currentGraph.push(leaf[j], d, leaf[i], true);
             }
@@ -91,7 +95,7 @@ class NearestNeighborDescent {
               continue;
             }
 
-            final float d = mMetric.distance(data.row(p), data.row(q));
+            final float d = mMetric.distance(rows[p], rows[q]);
             if (currentGraph.push(p, d, q, true)) {
               ++c;
             }
@@ -102,7 +106,7 @@ class NearestNeighborDescent {
         }
       }
 
-      if (c <= delta * nNeighbors * data.rows()) {
+      if (c <= delta * nNeighbors * nVertices) {
         UmapProgress.update(nIters - n);
         break;
       }

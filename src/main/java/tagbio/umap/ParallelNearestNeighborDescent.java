@@ -53,6 +53,10 @@ class ParallelNearestNeighborDescent extends  NearestNeighborDescent {
       final List<Future<Integer>> futures = new ArrayList<>();
 
       final int nVertices = data.rows();
+      final float[][] rows = new float[nVertices][];
+      for (int i = 0; i < nVertices; ++i) {
+        rows[i] = data.row(i);
+      }
       final Heap currentGraph = new Heap(data.rows(), nNeighbors);
 
       final int jobs = (int)(mThreads * (1 + MathUtils.log2(mThreads)));
@@ -66,9 +70,9 @@ class ParallelNearestNeighborDescent extends  NearestNeighborDescent {
         final Random jobRandom = randoms[t];
         futures.add(executor.submit(() -> {
           for (int i = lo; i < hi; ++i) {
-            final float[] iRow = data.row(i);
-            for (final int index : Utils.rejectionSample(nNeighbors, data.rows(), jobRandom)) {
-              final float d = mMetric.distance(iRow, data.row(index));
+            final float[] iRow = rows[i];
+            for (final int index : Utils.rejectionSample(nNeighbors, nVertices, jobRandom)) {
+              final float d = mMetric.distance(iRow, rows[index]);
               currentGraph.push(i, d, index, true);
               currentGraph.push(index, d, i, true);
             }
@@ -88,9 +92,9 @@ class ParallelNearestNeighborDescent extends  NearestNeighborDescent {
             for (int l = lo; l < hi; ++l) {
               for (final int[] leaf : forest.get(l).getIndices()) {
                 for (int i = 0; i < leaf.length; ++i) {
-                  final float[] iRow = data.row(leaf[i]);
+                  final float[] iRow = rows[leaf[i]];
                   for (int j = i + 1; j < leaf.length; ++j) {
-                    final float d = mMetric.distance(iRow, data.row(leaf[j]));
+                    final float d = mMetric.distance(iRow, rows[leaf[j]]);
                     currentGraph.push(leaf[i], d, leaf[j], true);
                     currentGraph.push(leaf[j], d, leaf[i], true);
                   }
@@ -134,7 +138,7 @@ class ParallelNearestNeighborDescent extends  NearestNeighborDescent {
                     continue;
                   }
 
-                  final float d = mMetric.distance(data.row(p), data.row(q));
+                  final float d = mMetric.distance(rows[p], rows[q]);
                   if (currentGraph.push(p, d, q, true)) {
                     ++c;
                   }
