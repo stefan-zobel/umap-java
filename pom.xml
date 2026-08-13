@@ -9,10 +9,33 @@
     <version>1.0-SNAPSHOT</version>
 
   <dependencies>
+    <!--
+      All three JavaFX modules are declared explicitly with the platform classifier:
+      the transitive dependencies of javafx-controls resolve without a classifier and
+      would pull in the empty platform independent jars.
+    -->
+    <dependency>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-base</artifactId>
+      <version>${javafx.version}</version>
+      <classifier>${javafx.platform}</classifier>
+    </dependency>
+    <dependency>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-graphics</artifactId>
+      <version>${javafx.version}</version>
+      <classifier>${javafx.platform}</classifier>
+    </dependency>
+    <dependency>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-controls</artifactId>
+      <version>${javafx.version}</version>
+      <classifier>${javafx.platform}</classifier>
+    </dependency>
     <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
-      <version>4.12</version>
+      <version>4.13.2</version>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -20,26 +43,87 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <checkstyle.config.location>checkstyle.xml</checkstyle.config.location>
+    <maven.compiler.release>25</maven.compiler.release>
+    <javafx.version>25.0.3</javafx.version>
+    <!-- JavaFX artifacts are platform specific; switch to mac/mac-aarch64/linux as needed. -->
+    <javafx.platform>win</javafx.platform>
+    <!-- Data file the viewer projects; override with -Dumap.data=... on the command line. -->
+    <umap.data>src/test/resources/tagbio/umap/digits.tsv</umap.data>
   </properties>
+
+  <!--
+    JavaFX ships one artifact per platform. These profiles pick the classifier for the
+    machine doing the build; javafx.platform in the properties above is only the fallback
+    when none of them matches.
+  -->
+  <profiles>
+    <profile>
+      <id>javafx-windows</id>
+      <activation>
+        <os><family>windows</family></os>
+      </activation>
+      <properties>
+        <javafx.platform>win</javafx.platform>
+      </properties>
+    </profile>
+    <profile>
+      <id>javafx-mac-intel</id>
+      <activation>
+        <os><family>mac</family><arch>x86_64</arch></os>
+      </activation>
+      <properties>
+        <javafx.platform>mac</javafx.platform>
+      </properties>
+    </profile>
+    <profile>
+      <id>javafx-mac-aarch64</id>
+      <activation>
+        <os><family>mac</family><arch>aarch64</arch></os>
+      </activation>
+      <properties>
+        <javafx.platform>mac-aarch64</javafx.platform>
+      </properties>
+    </profile>
+    <profile>
+      <id>javafx-linux</id>
+      <activation>
+        <os><family>unix</family><name>linux</name></os>
+      </activation>
+      <properties>
+        <javafx.platform>linux</javafx.platform>
+      </properties>
+    </profile>
+  </profiles>
 
   <build>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>2.3.2</version>
+        <version>3.15.0</version>
         <configuration>
-          <source>1.8</source>
-          <target>1.8</target>
+          <release>${maven.compiler.release}</release>
         </configuration>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-checkstyle-plugin</artifactId>
-        <version>3.1.0</version>
+        <version>3.6.0</version>
         <configuration>
           <consoleOutput>true</consoleOutput>
         </configuration>
+        <dependencies>
+          <!--
+            Checkstyle is pinned deliberately: 10.18.0 removed the "scope" property of
+            JavadocVariable in favour of "accessModifiers", which checkstyle.xml still uses.
+            Raising this further requires migrating that config first.
+          -->
+          <dependency>
+            <groupId>com.puppycrawl.tools</groupId>
+            <artifactId>checkstyle</artifactId>
+            <version>10.17.0</version>
+          </dependency>
+        </dependencies>
         <executions>
           <execution>
             <id>checkstyle</id>
@@ -49,6 +133,28 @@
             <phase>prepare-package</phase>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.6.3</version>
+        <configuration>
+          <!--
+            Run with: mvn exec:exec [-Dumap.data=path/to/data.tsv]
+            JavaFX goes on the module path here; the launcher class works either way.
+          -->
+          <executable>${java.home}/bin/java</executable>
+          <arguments>
+            <argument>--module-path</argument>
+            <modulepath/>
+            <argument>--add-modules</argument>
+            <argument>javafx.controls,javafx.graphics</argument>
+            <argument>-classpath</argument>
+            <classpath/>
+            <argument>tagbio.umap.fx.Launcher</argument>
+            <argument>${umap.data}</argument>
+          </arguments>
+        </configuration>
       </plugin>
     </plugins>
   </build>

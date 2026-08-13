@@ -8,6 +8,10 @@ package tagbio.umap;
 import junit.framework.Test;
 import junit.framework.TestSuite;
 
+import tagbio.umap.fx.ImageExportTest;
+import tagbio.umap.fx.LabelledDataTest;
+import tagbio.umap.fx.ViewTransformTest;
+
 /**
  * Links all the tests in this package.
  * @author Sean A. Irvine
@@ -20,11 +24,15 @@ public class AllTests extends TestSuite {
     suite.addTestSuite(CsrMatrixTest.class);
     suite.addTestSuite(DefaultMatrixTest.class);
     suite.addTestSuite(DigitDataTest.class);
+    suite.addTestSuite(ImageExportTest.class);
     suite.addTestSuite(IrisDataTest.class);
+    suite.addTestSuite(LabelledDataTest.class);
+    suite.addTestSuite(ParameterRangeTest.class);
     suite.addTestSuite(SortTest.class);
     suite.addTestSuite(SparseVectorTest.class);
     suite.addTestSuite(UmapTest.class);
     suite.addTestSuite(UtilsTest.class);
+    suite.addTestSuite(ViewTransformTest.class);
     return suite;
   }
 
