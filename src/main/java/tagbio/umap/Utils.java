@@ -108,23 +108,71 @@ final class Utils {
     if (nSamples > poolSize) {
       throw new IllegalArgumentException();
     }
+    if (nSamples == 0) {
+      return new int[0];
+    }
+
+    // O(k) sampling without replacement via a sparse index remap of a partial shuffle.
+    // This avoids the previous O(k^2) duplicate checks.
+    final int tableSize = tableSizeFor(nSamples << 2);
+    final int[] keys = new int[tableSize];
+    final int[] values = new int[tableSize];
+    Arrays.fill(keys, -1);
+    final int mask = tableSize - 1;
     final int[] result = new int[nSamples];
-    for (int i = 0; i < result.length; ++i) {
-      int j;
-      boolean ok;
-      do {
-        j = random.nextInt(poolSize);
-        ok = true;
-        for (int k = 0; k < i; ++k) {
-          if (j == result[k]) {
-            ok = false;
-            break;
-          }
-        }
-      } while (!ok);
-      result[i] = j;
+    for (int i = 0; i < nSamples; ++i) {
+      final int j = i + random.nextInt(poolSize - i);
+      final int vj = mapGet(keys, values, mask, j);
+      final int vi = mapGet(keys, values, mask, i);
+      mapPut(keys, values, mask, j, vi);
+      result[i] = vj;
     }
     return result;
+  }
+
+  private static int tableSizeFor(final int required) {
+    int n = 1;
+    while (n < required) {
+      n <<= 1;
+    }
+    return n;
+  }
+
+  private static int mix(final int x) {
+    int h = x * 0x9E3779B9;
+    h ^= h >>> 16;
+    return h;
+  }
+
+  private static int mapGet(final int[] keys, final int[] values, final int mask, final int key) {
+    int pos = mix(key) & mask;
+    while (true) {
+      final int k = keys[pos];
+      if (k == -1) {
+        return key;
+      }
+      if (k == key) {
+        return values[pos];
+      }
+      pos = (pos + 1) & mask;
+    }
+  }
+
+  private static void mapPut(final int[] keys, final int[] values, final int mask, final int key, final int value) {
+    int pos = mix(key) & mask;
+    while (true) {
+      final int k = keys[pos];
+      if (k == -1) {
+        keys[pos] = key;
+        values[pos] = value;
+        return;
+      }
+      if (k == key) {
+        values[pos] = value;
+        return;
+      }
+      pos = (pos + 1) & mask;
+    }
   }
 
 
