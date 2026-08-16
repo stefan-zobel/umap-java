@@ -18,7 +18,7 @@ import java.util.zip.GZIPInputStream;
  * This is the layout of the iris and digits files under <code>src/test/resources</code>,
  * so those can be projected without conversion.
  */
-public final class LabelledData {
+public final class LabelledData implements PointData {
 
   private final float[][] mData;
   private final String[] mSampleNames;
@@ -120,6 +120,7 @@ public final class LabelledData {
    * The attribute values, one row per sample.
    * @return the data rows
    */
+  @Override
   public float[][] getData() {
     return mData;
   }
@@ -128,6 +129,7 @@ public final class LabelledData {
    * The full sample name of each row, including the <code>:id</code> suffix.
    * @return the sample names
    */
+  @Override
   public String[] getSampleNames() {
     return mSampleNames;
   }
@@ -136,6 +138,7 @@ public final class LabelledData {
    * The distinct class names, in order of first appearance in the file.
    * @return the class names
    */
+  @Override
   public String[] getClassNames() {
     return mClassNames;
   }
@@ -144,6 +147,7 @@ public final class LabelledData {
    * The class of each row, as an index into {@link #getClassNames()}.
    * @return one class index per row
    */
+  @Override
   public int[] getClassIndices() {
     return mClassIndices;
   }

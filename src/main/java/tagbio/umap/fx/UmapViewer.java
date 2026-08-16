@@ -5,8 +5,10 @@ import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.Callable;
 
+import javafx.animation.Animation;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import javafx.application.Application;
-import javafx.application.Platform;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
@@ -20,8 +22,10 @@ import javafx.scene.control.Separator;
 import javafx.scene.control.Slider;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.VBox;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
+import javafx.util.Duration;
 
 import tagbio.umap.ProgressListener;
 import tagbio.umap.ProgressState;
@@ -29,9 +33,13 @@ import tagbio.umap.Umap;
 import tagbio.umap.UmapProgress;
 
 /**
- * Computes a two dimensional UMAP projection of a delimited data file and shows it as
- * coloured points, one colour per class taken from the sample name prefix. The three
- * parameters that shape the layout most can be changed and the projection recomputed.
+ * Computes a two dimensional UMAP projection and shows it as coloured points, one colour per
+ * class. The three parameters that shape the layout most can be changed and the projection
+ * recomputed.
+ *
+ * <p>The points come from either a delimited data file, where the class is the sample name
+ * prefix, or from the MNIST IDX pair, where it is the digit. Which one is decided from the
+ * launch argument.
  *
  * <p>Launch through {@link Launcher} rather than calling this class directly, so that the
  * viewer also starts when JavaFX is on the classpath instead of the module path.
@@ -48,6 +56,24 @@ public final class UmapViewer extends Application {
    */
   private static final double MAX_NEIGHBOURS = 100;
 
+  /**
+   * Fewest MNIST images offered, and the step the slider moves in.
+   *
+   * <p>Not an arbitrary floor. Umap computes the full pairwise distance matrix below
+   * <code>SMALL_PROBLEM_THRESHOLD</code>, which is 4096 rows, and the approximate neighbour
+   * descent above it. Measured on this data, 4000 points take 6.9 s and 5000 take 5.0 s - more
+   * points, less time - and the matrix alone is 67 MB just under the threshold. Starting at
+   * 5000 keeps the whole offered range on the side where the viewer gets steadily slower as it
+   * is given more to do, instead of having its worst case in the middle.
+   */
+  private static final int MIN_POINTS = 5000;
+
+  /** Images loaded unless the slider is moved. 10 000 of them project in about 10 s. */
+  private static final int DEFAULT_POINTS = 10000;
+
+  /** System property carrying the requested thread count; the POM passes it through. */
+  static final String THREADS_PROPERTY = "umap.threads";
+
   private final EmbeddingCanvas mCanvas = new EmbeddingCanvas();
   private final Legend mLegend = new Legend();
   private final ProgressBar mProgressBar = new ProgressBar(0);
@@ -56,11 +82,47 @@ public final class UmapViewer extends Application {
   private final Slider mMinDistSlider = new Slider(0, ParameterRange.maxMinDist(SPREAD), MIN_DIST);
   private final Slider mSpreadSlider =
     new Slider(ParameterRange.MIN_SPREAD, ParameterRange.MAX_SPREAD, SPREAD);
+  private final Slider mPointsSlider = new Slider(MIN_POINTS, DEFAULT_POINTS, DEFAULT_POINTS);
   private final Label mNeighbourValue = new Label();
   private final Label mMinDistValue = new Label();
   private final Label mSpreadValue = new Label();
+  private final Label mPointsValue = new Label();
 
-  private LabelledData mData;
+  /** Set when the argument names a directory holding the MNIST IDX pair. */
+  private File mMnistDirectory;
+  /** Set when the argument names a delimited data file. */
+  private String mDataFile;
+
+  /**
+   * Threads the projection may use, fixed for the session because it comes from a system
+   * property. Anything above one trades the reproducible embedding away, so the status line
+   * says when that has happened.
+   */
+  private final int mThreads =
+    resolveThreads(requestedThreads(), Runtime.getRuntime().availableProcessors());
+
+  /** False when the source fixes the point count, so that no fit may re-enable the slider. */
+  private boolean mPointsAdjustable;
+
+  /**
+   * Ticks once a second while a fit is running, so that the status line keeps moving even
+   * through a phase that reports nothing.
+   *
+   * <p>A bar alone is not enough here. Umap builds its progress total in three goes - it
+   * resets to 5, adds the trees and the descent iterations, and only then adds the epochs
+   * (<code>Umap.java:1103</code>, <code>:232</code>, <code>:1191</code>) - so the fraction
+   * jumps backwards twice per run as the denominator grows. That is over in a blink on a small
+   * file and is on screen for minutes at sixty thousand points, where a bar pinned near the
+   * left is indistinguishable from a hang.
+   */
+  private final Timeline mElapsed =
+    new Timeline(new KeyFrame(Duration.seconds(1), event -> showElapsed()));
+  private long mFitStart;
+  private String mFitDescription = "";
+  /** Latest progress, written by the listener and read by the ticker. */
+  private volatile int mProgressCount;
+  private volatile int mProgressTotal;
+
   private boolean mFitting;
   /** Set while sliders are being adjusted programmatically, to suppress spurious refits. */
   private boolean mAdjusting;
@@ -68,27 +130,80 @@ public final class UmapViewer extends Application {
   @Override
   public void start(final Stage stage) {
     stage.setTitle("UMAP projection");
-    stage.setScene(new Scene(buildRoot(), 1180, 780));
+    stage.setScene(new Scene(buildRoot(), 1180, 820));
     stage.show();
 
-    final String file = dataFile(getParameters().getRaw());
-    if (file == null) {
-      mStatus.setText("Pass the path to a tab or comma separated data file as the first argument.");
+    final String argument = dataArgument(getParameters().getRaw());
+    if (argument == null) {
+      mStatus.setText("Pass a data file, or a directory holding the MNIST IDX files, as the first argument.");
       return;
     }
-    loadAndFit(file);
+    final File path = new File(argument);
+    if (MnistData.isMnistDirectory(path)) {
+      if (!configureForMnist(path)) {
+        return;
+      }
+    } else {
+      mDataFile = argument;
+      // The whole file is projected, so there is nothing for the point count to select.
+      mPointsSlider.setDisable(true);
+      mPointsValue.setText("file");
+    }
+    refit();
+  }
+
+  /**
+   * Point the viewer at MNIST and size the point slider to what the file actually holds.
+   * @param directory the directory holding the two IDX files
+   * @return false if the images could not be read, in which case the status line says so
+   */
+  private boolean configureForMnist(final File directory) {
+    final int available;
+    try {
+      // Only the header is read, so this is cheap enough to do on the application thread.
+      available = MnistData.available(directory);
+    } catch (final IOException e) {
+      mStatus.setText("Cannot read the MNIST images: " + e.getMessage());
+      return false;
+    }
+    mMnistDirectory = directory;
+    mAdjusting = true;
+    try {
+      if (available <= MIN_POINTS) {
+        // Fewer images than the slider's own floor: there is nothing to choose between, so it
+        // is pinned to what the file holds. Collapsing the range rather than lowering only the
+        // maximum matters, because a minimum left above the value would clamp it back up and
+        // the loader would then ask for more records than there are.
+        mPointsSlider.setMin(available);
+        mPointsSlider.setMax(available);
+        mPointsSlider.setValue(available);
+        mPointsSlider.setDisable(true);
+      } else {
+        mPointsAdjustable = true;
+        mPointsSlider.setMax(available);
+        mPointsSlider.setValue(Math.min(DEFAULT_POINTS, available));
+      }
+    } finally {
+      mAdjusting = false;
+    }
+    updatePointsLabel();
+    return true;
   }
 
   private BorderPane buildRoot() {
+    mElapsed.setCycleCount(Animation.INDEFINITE);
     configureSlider(mNeighbourSlider, 1);
     configureSlider(mMinDistSlider, ParameterRange.STEP);
     configureSlider(mSpreadSlider, ParameterRange.STEP);
+    configureSlider(mPointsSlider, MIN_POINTS);
     updateNeighbourLabel();
     updateMinDistLabel();
     updateSpreadLabel();
+    updatePointsLabel();
     wireRecompute(mNeighbourSlider, this::updateNeighbourLabel);
     wireRecompute(mMinDistSlider, this::updateMinDistLabel);
     wireRecompute(mSpreadSlider, this::spreadChanged);
+    wireRecompute(mPointsSlider, this::updatePointsLabel);
 
     mLegend.setOnVisibilityChanged(() -> mCanvas.setVisibleClasses(mLegend.getVisible()));
 
@@ -97,15 +212,21 @@ public final class UmapViewer extends Application {
     final Button exportPng = new Button("Export PNG...");
     exportPng.setOnAction(event -> exportPng());
 
-    final HBox controls = new HBox(10,
+    final HBox parameters = new HBox(10,
       new Label("Neighbours"), mNeighbourSlider, mNeighbourValue,
       new Separator(Orientation.VERTICAL),
       new Label("Min dist"), mMinDistSlider, mMinDistValue,
       new Separator(Orientation.VERTICAL),
-      new Label("Spread"), mSpreadSlider, mSpreadValue,
+      new Label("Spread"), mSpreadSlider, mSpreadValue);
+    parameters.setAlignment(Pos.CENTER_LEFT);
+
+    final HBox actions = new HBox(10,
+      new Label("Points"), mPointsSlider, mPointsValue,
       new Separator(Orientation.VERTICAL),
       resetView, exportPng);
-    controls.setAlignment(Pos.CENTER_LEFT);
+    actions.setAlignment(Pos.CENTER_LEFT);
+
+    final VBox controls = new VBox(8, parameters, actions);
     controls.setPadding(new Insets(8, 12, 8, 12));
 
     final ScrollPane legendPane = new ScrollPane(mLegend);
@@ -182,6 +303,12 @@ public final class UmapViewer extends Application {
     mSpreadValue.setText(String.format("%.2f", spread()));
   }
 
+  private void updatePointsLabel() {
+    if (mDataFile == null) {
+      mPointsValue.setText(String.valueOf(points()));
+    }
+  }
+
   private int neighbours() {
     return (int) Math.round(mNeighbourSlider.getValue());
   }
@@ -194,7 +321,45 @@ public final class UmapViewer extends Application {
     return (float) mSpreadSlider.getValue();
   }
 
-  private static String dataFile(final List<String> args) {
+  private int points() {
+    return (int) Math.round(mPointsSlider.getValue());
+  }
+
+  /**
+   * The thread count asked for through {@value #THREADS_PROPERTY}, or zero when it was not set
+   * or does not parse as an integer. A malformed value is treated as absent rather than fatal:
+   * it is a tuning knob, and refusing to start over it would be out of proportion.
+   *
+   * @return the requested count, zero meaning nothing was requested
+   */
+  static int requestedThreads() {
+    final Integer requested = Integer.getInteger(THREADS_PROPERTY);
+    return requested == null ? 0 : requested;
+  }
+
+  /**
+   * How many threads a projection will actually use.
+   *
+   * <p>At or below zero this is one, which is the only setting under which the embedding is
+   * reproducible. Above zero it is <code>min(requested, cores)</code>: the request is honoured
+   * up to what the machine has, and asking for more threads than there are cores gets the core
+   * count rather than oversubscribing it.
+   *
+   * <p>The core count is a parameter rather than read here so that the rule can be asserted
+   * without depending on the machine running the test.
+   *
+   * @param requested the value of the system property, zero if unset
+   * @param cores the number of logical cores available
+   * @return the thread count to hand to Umap, never below one
+   */
+  static int resolveThreads(final int requested, final int cores) {
+    if (requested <= 0) {
+      return 1;
+    }
+    return Math.min(requested, Math.max(cores, 1));
+  }
+
+  private static String dataArgument(final List<String> args) {
     for (final String arg : args) {
       if (!arg.trim().isEmpty()) {
         return arg.trim();
@@ -203,21 +368,40 @@ public final class UmapViewer extends Application {
     return null;
   }
 
-  private void loadAndFit(final String file) {
-    final Settings settings = currentSettings();
-    startFit(() -> {
-      final LabelledData data = LabelledData.load(file);
-      return settings.project(data);
-    });
-  }
-
   private void refit() {
-    final LabelledData data = mData;
-    if (data == null || mFitting || mAdjusting) {
+    if (mFitting || mAdjusting || (mMnistDirectory == null && mDataFile == null)) {
       return;
     }
     final Settings settings = currentSettings();
-    startFit(() -> settings.project(data));
+    final Callable<PointData> loader = currentLoader();
+    mFitDescription = describeRequest();
+    startFit(() -> settings.project(loader.call()));
+  }
+
+  /** What the run about to start was asked for, for the status line while it is running. */
+  private String describeRequest() {
+    final StringBuilder text = new StringBuilder();
+    if (mMnistDirectory != null) {
+      text.append(points()).append(" points, ");
+    }
+    return text.append("neighbours ").append(neighbours()).toString();
+  }
+
+  /**
+   * Keep the status line moving whether or not the algorithm has anything to report.
+   *
+   * <p>Measured on 60 000 points at 50 neighbours, a 157 s run leaves the progress fraction on
+   * one value for 42 s and on the next for another 23 s: the whole graph construction between
+   * the neighbour search and the epochs reports twice. A bar alone therefore says "hung" for
+   * two thirds of a minute at a stretch. The seconds here keep counting through that, and the
+   * raw step is shown next to them so that the denominator growing mid-run is legible rather
+   * than mysterious.
+   */
+  private void showElapsed() {
+    final int total = mProgressTotal;
+    final String step = total > 0 ? String.format("step %d/%d, ", mProgressCount, total) : "";
+    mStatus.setText(String.format("Fitting %s - %s%d s",
+      mFitDescription, step, (System.currentTimeMillis() - mFitStart) / 1000));
   }
 
   /**
@@ -225,14 +409,41 @@ public final class UmapViewer extends Application {
    * hand the background thread a fixed set of parameters.
    */
   private Settings currentSettings() {
-    return new Settings(neighbours(), minDist(), spread());
+    return new Settings(neighbours(), minDist(), spread(), mThreads);
+  }
+
+  /**
+   * How the next fit is to get its points, resolved on the application thread so that the
+   * worker never reads a control.
+   *
+   * <p>The data is read again for every fit rather than kept. Re-reading is well under a
+   * second either way, against a projection measured in seconds to a minute, and holding it
+   * would mean deciding when a cached table has gone stale against the point count.
+   *
+   * @return a loader safe to call from a background thread
+   */
+  private Callable<PointData> currentLoader() {
+    final File directory = mMnistDirectory;
+    if (directory != null) {
+      final int points = points();
+      return () -> MnistData.load(directory, points);
+    }
+    final String file = mDataFile;
+    return () -> LabelledData.load(file);
   }
 
   private void startFit(final Callable<Projection> work) {
     mFitting = true;
     setControlsDisabled(true);
-    mProgressBar.setProgress(0);
-    mStatus.setText("Fitting...");
+    // Indeterminate, not zero. See the comment on mElapsed: the fraction is not monotonic, so
+    // a determinate bar would visibly run backwards. The barber pole says only "still working",
+    // which is the one thing it can say truthfully throughout.
+    mProgressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
+    mProgressCount = 0;
+    mProgressTotal = 0;
+    mFitStart = System.currentTimeMillis();
+    showElapsed();
+    mElapsed.playFromStart();
 
     final Task<Projection> task = new Task<Projection>() {
       @Override
@@ -243,25 +454,31 @@ public final class UmapViewer extends Application {
 
     // UmapProgress is a global singleton, so the listener has to come off again once the
     // fit has finished.
+    // Only records; every control is touched by the ticker on the application thread, so no
+    // hop is needed here and a burst of notifications cannot flood the event queue.
     final ProgressListener listener = (final ProgressState state) -> {
-      final int total = state.getTotal();
-      final double fraction = total > 0 ? state.getCount() / (double) total : -1;
-      Platform.runLater(() -> mProgressBar.setProgress(fraction));
+      mProgressCount = state.getCount();
+      mProgressTotal = state.getTotal();
     };
     UmapProgress.addProgressListener(listener);
 
     task.setOnSucceeded(event -> {
       UmapProgress.removeProgressListener(listener);
       final Projection projection = task.getValue();
-      mData = projection.getData();
       mCanvas.setProjection(projection);
-      mLegend.setClasses(mData.getClassNames());
+      mLegend.setClasses(projection.getData().getClassNames());
       mProgressBar.setProgress(1);
       // Reported from the projection, not from the sliders: the two can differ if the
       // sliders moved again while this fit was running.
-      mStatus.setText(String.format("%d points, %d classes, neighbours %d, min dist %.2f, spread %.2f",
-        projection.getEmbedding().length, mData.getClassNames().length,
-        projection.getNeighbours(), projection.getMinDist(), projection.getSpread()));
+      final String threads = mThreads > 1
+        // Worth saying every time rather than once at startup: with more than one thread the
+        // same settings give a different picture on the next run, so two maps being unalike is
+        // no longer evidence that anything was changed.
+        ? String.format("  [%d threads, embedding not reproducible]", mThreads)
+        : "";
+      mStatus.setText(String.format("%d points, %d classes, neighbours %d, min dist %.2f, spread %.2f%s",
+        projection.getEmbedding().length, projection.getData().getClassNames().length,
+        projection.getNeighbours(), projection.getMinDist(), projection.getSpread(), threads));
       finishFit();
     });
     task.setOnFailed(event -> {
@@ -305,6 +522,7 @@ public final class UmapViewer extends Application {
   }
 
   private void finishFit() {
+    mElapsed.stop();
     mFitting = false;
     setControlsDisabled(false);
   }
@@ -313,6 +531,10 @@ public final class UmapViewer extends Application {
     mNeighbourSlider.setDisable(disabled);
     mMinDistSlider.setDisable(disabled);
     mSpreadSlider.setDisable(disabled);
+    // A source that fixes the point count leaves the slider disabled throughout.
+    if (mPointsAdjustable) {
+      mPointsSlider.setDisable(disabled);
+    }
   }
 
   /** One immutable set of projection parameters, safe to hand to a background thread. */
@@ -320,23 +542,28 @@ public final class UmapViewer extends Application {
     private final int mNeighbours;
     private final float mMinDist;
     private final float mSpread;
+    private final int mThreads;
 
-    private Settings(final int neighbours, final float minDist, final float spread) {
+    private Settings(final int neighbours, final float minDist, final float spread, final int threads) {
       mNeighbours = neighbours;
       mMinDist = minDist;
       mSpread = spread;
+      mThreads = threads;
     }
 
-    private Projection project(final LabelledData data) {
-      // A fixed seed on a single thread keeps the picture reproducible; more than one
-      // thread makes the embedding differ between runs.
+    private Projection project(final PointData data) {
+      // A fixed seed on a single thread keeps the picture reproducible; more than one thread
+      // makes the embedding differ between runs. One thread is fast enough for everything this
+      // viewer offers - all 60 000 MNIST images project in under a minute at the default
+      // neighbour count - which is why it is the default and why anything else has to be asked
+      // for deliberately through the umap.threads property.
       final Umap umap = new Umap()
         .setNumberComponents(2)
         .setNumberNearestNeighbours(mNeighbours)
         .setMinDist(mMinDist)
         .setSpread(mSpread)
         .setSeed(SEED)
-        .setThreads(1);
+        .setThreads(mThreads);
       return new Projection(data, umap.fitTransform(data.getData()), mNeighbours, mMinDist, mSpread);
     }
   }

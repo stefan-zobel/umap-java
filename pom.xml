@@ -65,8 +65,22 @@
     <javafx.version>25.0.3</javafx.version>
     <!-- JavaFX artifacts are platform specific; switch to mac/mac-aarch64/linux as needed. -->
     <javafx.platform>win</javafx.platform>
-    <!-- Data file the viewer projects; override with -Dumap.data=... on the command line. -->
+    <!--
+      What the viewer projects; override with -Dumap.data=... on the command line. A file is
+      read as delimited text, a directory holding the MNIST IDX pair is read as MNIST.
+    -->
     <umap.data>src/test/resources/tagbio/umap/digits.tsv</umap.data>
+    <!--
+      All 60 000 MNIST images are a float[60000][784], 188 MB, and every fit reads them again
+      rather than caching them. The default data file needs a small fraction of this.
+    -->
+    <umap.heap>-Xmx4g</umap.heap>
+    <!--
+      Threads the projection may use. Unset or <= 0 means one, which is the only setting that
+      gives a reproducible embedding. Above zero the viewer uses min(this, logical cores), so
+      the request is honoured up to what the machine actually has.
+    -->
+    <umap.threads>0</umap.threads>
   </properties>
 
   <!--
@@ -163,6 +177,8 @@
           -->
           <executable>${java.home}/bin/java</executable>
           <arguments>
+            <argument>${umap.heap}</argument>
+            <argument>-Dumap.threads=${umap.threads}</argument>
             <argument>--module-path</argument>
             <modulepath/>
             <argument>--add-modules</argument>

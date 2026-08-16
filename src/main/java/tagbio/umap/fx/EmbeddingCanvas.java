@@ -41,7 +41,13 @@ final class EmbeddingCanvas extends Region {
   private Projection mProjection;
   private float[][] mPoints;
   private int[] mClassIndices;
-  private int mClassCount;
+  /**
+   * The point indices of each class. The draw loop runs one class at a time, and grouping them
+   * up front turns that from a full scan per class into a single pass. At the ten classes and
+   * 60 000 points of MNIST that is the difference between 600 000 and 60 000 iterations for
+   * every pan, zoom and resize.
+   */
+  private int[][] mByClass;
   /** Null means every class is shown. */
   private boolean[] mVisibleClasses;
 
@@ -98,10 +104,11 @@ final class EmbeddingCanvas extends Region {
     mProjection = projection;
     mPoints = projection.getEmbedding();
     mClassIndices = projection.getData().getClassIndices();
-    mClassCount = projection.getData().getClassNames().length;
     // The class count can change with the data, so any previous filter is dropped.
     mVisibleClasses = null;
     hideReadout();
+
+    groupByClass(projection.getData().getClassNames().length);
 
     mMinX = 0;
     mMaxX = 0;
@@ -120,6 +127,23 @@ final class EmbeddingCanvas extends Region {
       }
     }
     resetView();
+  }
+
+  /** Bucket the point indices by class in one pass, counting first so nothing has to grow. */
+  private void groupByClass(final int classCount) {
+    final int[] counts = new int[classCount];
+    for (final int cls : mClassIndices) {
+      ++counts[cls];
+    }
+    mByClass = new int[classCount][];
+    for (int cls = 0; cls < classCount; ++cls) {
+      mByClass[cls] = new int[counts[cls]];
+    }
+    final int[] filled = new int[classCount];
+    for (int i = 0; i < mClassIndices.length; ++i) {
+      final int cls = mClassIndices[i];
+      mByClass[cls][filled[cls]++] = i;
+    }
   }
 
   /**
@@ -197,17 +221,13 @@ final class EmbeddingCanvas extends Region {
     // instead of magnifying blobs.
     final double diameter = 2 * POINT_RADIUS;
     // Outer loop over classes so the fill colour is set once per class rather than once per
-    // point.
-    final int classCount = mClassIndices == null ? 1 : Math.max(mClassCount, 1);
-    for (int cls = 0; cls < classCount; ++cls) {
+    // point, and so hiding a class costs one check instead of one per point.
+    for (int cls = 0; cls < mByClass.length; ++cls) {
       if (!isClassVisible(cls)) {
         continue;
       }
       gfx.setFill(Palette.forClass(cls));
-      for (int i = 0; i < mPoints.length; ++i) {
-        if (mClassIndices != null && mClassIndices[i] != cls) {
-          continue;
-        }
+      for (final int i : mByClass[cls]) {
         final double px = mView.toScreenX(mPoints[i][0]);
         final double py = mView.toScreenY(mPoints[i][1]);
         if (px >= -POINT_RADIUS && px <= width + POINT_RADIUS
@@ -232,7 +252,7 @@ final class EmbeddingCanvas extends Region {
     int bestIndex = -1;
     for (int i = 0; i < mPoints.length; ++i) {
       // A hidden point must not be pickable, or the readout describes something invisible.
-      if (mClassIndices != null && !isClassVisible(mClassIndices[i])) {
+      if (!isClassVisible(mClassIndices[i])) {
         continue;
       }
       final double dx = mView.toScreenX(mPoints[i][0]) - cursorX;
@@ -252,7 +272,7 @@ final class EmbeddingCanvas extends Region {
       hideReadout();
       return;
     }
-    final LabelledData data = mProjection.getData();
+    final PointData data = mProjection.getData();
     final String className = data.getClassNames()[data.getClassIndices()[index]];
     mReadout.setText(data.getSampleNames()[index] + '\n'
       + "class: " + className + '\n'

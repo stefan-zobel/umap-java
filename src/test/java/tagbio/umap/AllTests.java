@@ -10,6 +10,8 @@ import junit.framework.TestSuite;
 
 import tagbio.umap.fx.ImageExportTest;
 import tagbio.umap.fx.LabelledDataTest;
+import tagbio.umap.fx.MnistDataTest;
+import tagbio.umap.fx.ThreadResolutionTest;
 import tagbio.umap.fx.ViewTransformTest;
 
 /**
@@ -27,9 +29,11 @@ public class AllTests extends TestSuite {
     suite.addTestSuite(ImageExportTest.class);
     suite.addTestSuite(IrisDataTest.class);
     suite.addTestSuite(LabelledDataTest.class);
+    suite.addTestSuite(MnistDataTest.class);
     suite.addTestSuite(ParameterRangeTest.class);
     suite.addTestSuite(SortTest.class);
     suite.addTestSuite(SparseVectorTest.class);
+    suite.addTestSuite(ThreadResolutionTest.class);
     suite.addTestSuite(UmapTest.class);
     suite.addTestSuite(UtilsTest.class);
     suite.addTestSuite(ViewTransformTest.class);

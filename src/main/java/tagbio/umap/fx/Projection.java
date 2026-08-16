@@ -7,13 +7,13 @@ package tagbio.umap.fx;
  */
 final class Projection {
 
-  private final LabelledData mData;
+  private final PointData mData;
   private final float[][] mEmbedding;
   private final int mNeighbours;
   private final float mMinDist;
   private final float mSpread;
 
-  Projection(final LabelledData data, final float[][] embedding, final int neighbours, final float minDist, final float spread) {
+  Projection(final PointData data, final float[][] embedding, final int neighbours, final float minDist, final float spread) {
     mData = data;
     mEmbedding = embedding;
     mNeighbours = neighbours;
@@ -25,7 +25,7 @@ final class Projection {
    * The source data, including sample and class names.
    * @return the projected data
    */
-  LabelledData getData() {
+  PointData getData() {
     return mData;
   }
 
