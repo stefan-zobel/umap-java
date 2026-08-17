@@ -456,6 +456,68 @@ public class UmapTest extends TestCase {
     assertEquals(8.0F, rho(d, 4.0F), 1e-6);
   }
 
+  /**
+   * When nNeighbors reaches or exceeds the number of rows it is truncated to rows - 1, so
+   * every such setting has to produce the same embedding. If any step downstream used the
+   * requested count instead of the truncated one, these two runs would diverge.
+   *
+   * Note this exercises the small-data branch. The large-data branch cannot be covered the
+   * same way: it needs at least SMALL_PROBLEM_THRESHOLD rows and an equally large neighbour
+   * count, which means a 4096 by 4095 heap and a nearest neighbor descent over it.
+   */
+  public void testNeighbourCountExceedingDataSizeIsTruncated() throws IOException {
+    final Data data = new IrisData();
+    final float[][] d = data.getData();
+    final int rows = d.length;
+
+    final Umap exactly = new Umap();
+    exactly.setSeed(42);
+    exactly.setNumberNearestNeighbours(rows);
+    final float[][] a = exactly.fitTransform(d);
+
+    final Umap beyond = new Umap();
+    beyond.setSeed(42);
+    beyond.setNumberNearestNeighbours(2 * rows);
+    final float[][] b = beyond.fitTransform(d);
+
+    assertEquals(rows, a.length);
+    assertEquals(2, a[0].length);
+    for (int i = 0; i < rows; ++i) {
+      for (int j = 0; j < a[i].length; ++j) {
+        assertEquals("row " + i + " column " + j, a[i][j], b[i][j]);
+      }
+    }
+    // Still a usable embedding, not just a reproducible one.
+    assertAgreementAtLeast(0.88, a, data.getSampleClassIndex());
+  }
+
+  /**
+   * The neighbour count handed to fuzzySimplicialSet is not cosmetic: it becomes the target
+   * of the smooth knn distance search, so passing the untruncated count while the distance
+   * arrays hold the truncated one changes the graph. This is what makes the previous test's
+   * invariant meaningful.
+   */
+  public void testFuzzySimplicialSetDependsOnNeighbourCount() throws IOException {
+    final Matrix distances = new IrisData(true).getDistances();
+    final IndexedDistances nn = Umap.nearestNeighbors(distances, 3, PrecomputedMetric.SINGLETON, false, null, 1, false);
+
+    final float[][] matching = Umap.fuzzySimplicialSet(distances, 3, null, PrecomputedMetric.SINGLETON,
+      nn.getIndices(), nn.getDistances(), false, 1, 1, 1, false).toArray();
+    final float[][] mismatched = Umap.fuzzySimplicialSet(distances, 2, null, PrecomputedMetric.SINGLETON,
+      nn.getIndices(), nn.getDistances(), false, 1, 1, 1, false).toArray();
+
+    boolean differs = false;
+    for (int i = 0; i < matching.length && !differs; ++i) {
+      for (int j = 0; j < matching[i].length; ++j) {
+        if (matching[i][j] != mismatched[i][j]) {
+          differs = true;
+          break;
+        }
+      }
+    }
+    assertTrue("neighbour count does not reach the graph", differs);
+  }
+
   public void testNearestNeighborsPrecomputed() throws IOException {
     final Matrix distances = new IrisData(true).getDistances();
     final IndexedDistances id = Umap.nearestNeighbors(distances, 2, PrecomputedMetric.SINGLETON, false, null, 1, false);

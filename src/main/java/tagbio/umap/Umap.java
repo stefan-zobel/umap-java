@@ -1197,7 +1197,9 @@ public class Umap {
       mKnnDists = nn.getDistances();
       mRpForest = nn.getForest();
 
-      mGraph = fuzzySimplicialSet(instances, mNNeighbors, mRandom, mMetric, mKnnIndices, mKnnDists, mAngularRpForest, mSetOpMixRatio, mLocalConnectivity, mThreads, mVerbose);
+      // mRunNNeighbors, not mNNeighbors: the neighbour count may have been truncated above,
+      // and mKnnDists has that many columns.
+      mGraph = fuzzySimplicialSet(instances, mRunNNeighbors, mRandom, mMetric, mKnnIndices, mKnnDists, mAngularRpForest, mSetOpMixRatio, mLocalConnectivity, mThreads, mVerbose);
 
       final Metric distanceFunc = mMetric;
       if (mMetric == PrecomputedMetric.SINGLETON) {
