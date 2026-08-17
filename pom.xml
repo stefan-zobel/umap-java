@@ -70,6 +70,7 @@
       read as delimited text, a directory holding the MNIST IDX pair is read as MNIST.
     -->
     <umap.data>src/test/resources/tagbio/umap/digits.tsv</umap.data>
+    <!--umap.data>src/test/resources/mnist</umap.data-->
     <!--
       All 60 000 MNIST images are a float[60000][784], 188 MB, and every fit reads them again
       rather than caching them. The default data file needs a small fraction of this.
