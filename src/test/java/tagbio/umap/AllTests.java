@@ -26,6 +26,7 @@ public class AllTests extends TestSuite {
     suite.addTestSuite(CsrMatrixTest.class);
     suite.addTestSuite(DefaultMatrixTest.class);
     suite.addTestSuite(DigitDataTest.class);
+    suite.addTestSuite(EuclideanMetricAccuracyTest.class);
     suite.addTestSuite(ImageExportTest.class);
     suite.addTestSuite(IrisDataTest.class);
     suite.addTestSuite(LabelledDataTest.class);

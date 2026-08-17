@@ -212,5 +212,20 @@ public class MathUtilsTest extends TestCase {
     MathUtils.zeroEntriesBelowLimit(data, 9);
     assertTrue(Arrays.equals(new float[]{9, 0, 0, 0, 0, 12, 34, 26, 0, 0}, data));
   }
+
+  /**
+   * Both overloads lost their only callers when UmapTest stopped asserting on frozen sums of
+   * an embedding. The values here are exactly representable, so the assertions say what the
+   * methods compute without pinning down how they accumulate.
+   */
+  public void testSum() {
+    assertEquals(0.0F, MathUtils.sum(new float[][]{{}}));
+    assertEquals(10.5F, MathUtils.sum(new float[][]{{1, 2}, {3, 4.5F}}));
+    assertEquals(-1.0F, MathUtils.sum(new float[][]{{2.5F, -3.5F}}));
+
+    assertEquals(0.0, MathUtils.sum(new double[][]{{}}), 0.0);
+    assertEquals(10.5, MathUtils.sum(new double[][]{{1, 2}, {3, 4.5}}), 0.0);
+    assertEquals(-1.0, MathUtils.sum(new double[][]{{2.5, -3.5}}), 0.0);
+  }
 }
 
