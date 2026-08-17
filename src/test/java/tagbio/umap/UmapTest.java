@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Random;
 
 import junit.framework.TestCase;
 import tagbio.umap.metric.PrecomputedMetric;
@@ -605,6 +606,47 @@ public class UmapTest extends TestCase {
 
   public void testMakeEpochsPerSample() {
     assertEquals("[84.0, 42.0, 10.5, 1.0]", Arrays.toString(Umap.makeEpochsPerSample(new float[] {0.5F, 1, 4, 42}, 10)));
+  }
+
+  /** A weight of zero means "never sample", which is marked with a negative value. */
+  public void testMakeEpochsPerSampleMarksZeroWeights() {
+    final float[] result = Umap.makeEpochsPerSample(new float[] {0, 4, 0, 42}, 10);
+    assertTrue("zero weight not marked: " + result[0], result[0] < 0);
+    assertTrue("zero weight not marked: " + result[2], result[2] < 0);
+    assertEquals(10.5F, result[1], 1e-6);
+    assertEquals(1.0F, result[3], 1e-6);
+  }
+
+  /**
+   * A 1-simplex marked as "never sample" must not be optimized at all. The marker is
+   * negative, so a due date carried straight into the loop would already be in the past in
+   * epoch zero and would drift further into the past as it is advanced -- the simplex would
+   * be sampled in every epoch instead of in none, the exact opposite of what is meant.
+   *
+   * Vertices 2 and 3 appear only in the marked simplex. Negative sampling reads other
+   * vertices but only ever writes the head of the simplex it is processing, so if the marked
+   * simplex is skipped those two rows must come back exactly as they went in.
+   */
+  public void testOptimizeLayoutSkipsUnsampledSimplices() {
+    final float[][] initial = {{1, 2}, {3, 4}, {-5, -6}, {-7, -8}};
+    final float[][] positions = new float[initial.length][];
+    for (int i = 0; i < initial.length; ++i) {
+      positions[i] = Arrays.copyOf(initial[i], initial[i].length);
+    }
+    final DefaultMatrix embedding = new DefaultMatrix(positions);
+
+    final int[] head = {0, 2};
+    final int[] tail = {1, 3};
+    final float[] epochsPerSample = {1.0F, -1.0F};   // second simplex is never to be sampled
+
+    new Umap().optimizeLayout(embedding, embedding, head, tail, 20, initial.length, epochsPerSample,
+      1.577F, 0.895F, new Random(42), 1.0F, 1.0F, 5.0F, false);
+
+    assertTrue("vertex 0 was not optimized at all", positions[0][0] != initial[0][0] || positions[0][1] != initial[0][1]);
+    for (int i = 2; i < initial.length; ++i) {
+      assertEquals("vertex " + i + " moved", initial[i][0], positions[i][0]);
+      assertEquals("vertex " + i + " moved", initial[i][1], positions[i][1]);
+    }
   }
 
   public void testClip() {

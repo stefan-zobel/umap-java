@@ -491,7 +491,7 @@ public class Umap {
    * @param verbose Whether to report information on the current progress of the algorithm.
    * @return array of shape <code>(nSamples, nComponents)</code> The optimized embedding.
    */
-  private Matrix optimizeLayout(final Matrix headEmbedding, final Matrix tailEmbedding, final int[] head, final int[] tail, final int nEpochs, final int nVertices, final float[] epochsPerSample, final float a, final float b, final Random random, final float gamma, final float initialAlpha, final float negativeSampleRate, final boolean verbose) {
+  Matrix optimizeLayout(final Matrix headEmbedding, final Matrix tailEmbedding, final int[] head, final int[] tail, final int nEpochs, final int nVertices, final float[] epochsPerSample, final float a, final float b, final Random random, final float gamma, final float initialAlpha, final float negativeSampleRate, final boolean verbose) {
 
     if (!(headEmbedding instanceof DefaultMatrix)) {
       throw new UnsupportedOperationException("Require matrix we can set entries on");
@@ -505,6 +505,16 @@ public class Umap {
     final float[] epochsPerNegativeSample = MathUtils.divide(epochsPerSample, negativeSampleRate);
     final float[] epochOfNextNegativeSample = Arrays.copyOf(epochsPerNegativeSample, epochsPerNegativeSample.length);
     final float[] epochOfNextSample = Arrays.copyOf(epochsPerSample, epochsPerSample.length);
+
+    // makeEpochsPerSample marks "never sample this 1-simplex" with a negative value. Left as
+    // it is, that due date is already past in epoch zero and only moves further into the past
+    // as it is advanced, so the simplex would be sampled in every epoch rather than in none.
+    // A due date that never arrives says what was meant, and costs nothing in the loop below.
+    for (int i = 0; i < epochOfNextSample.length; ++i) {
+      if (epochsPerSample[i] < 0) {
+        epochOfNextSample[i] = Float.POSITIVE_INFINITY;
+      }
+    }
 
     for (int n = 0; n < nEpochs; ++n) {
       for (int i = 0; i < epochsPerSample.length; ++i) {

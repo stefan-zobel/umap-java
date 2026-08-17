@@ -112,8 +112,9 @@ class CsrMatrix extends Matrix {
         d[j] = mData[j] / max;
       }
     }
-    // Note would be safer to copy mIndptr and mIndices arrays
-    return new CsrMatrix(d, mIndptr, mIndices, rows(), cols());
+    // The index arrays are copied rather than shared: final fields protect the references,
+    // not the arrays, so sharing them would silently couple this matrix to the result.
+    return new CsrMatrix(d, Arrays.copyOf(mIndptr, mIndptr.length), Arrays.copyOf(mIndices, mIndices.length), rows(), cols());
   }
 
   @Override
@@ -128,8 +129,8 @@ class CsrMatrix extends Matrix {
         d[j] = mData[j] / l1;
       }
     }
-    // Note would be safer to copy mIndptr and mIndices arrays
-    return new CsrMatrix(d, mIndptr, mIndices, rows(), cols());
+    // See rowNormalize: the index arrays are copied, not shared.
+    return new CsrMatrix(d, Arrays.copyOf(mIndptr, mIndptr.length), Arrays.copyOf(mIndices, mIndices.length), rows(), cols());
   }
 
   int[][] reshapeIndicies(final int rows, final int cols) {
