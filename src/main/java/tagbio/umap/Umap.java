@@ -603,7 +603,8 @@ public class Umap {
       }
     }
 
-    final float[] graphData = graph.data();
+    // Must be the live array: data() hands back a copy, so pruning it would be discarded.
+    final float[] graphData = graph.mutableData();
     MathUtils.zeroEntriesBelowLimit(graphData, MathUtils.max(graphData) / (float) nEpochs);
     graph = (CooMatrix) graph.eliminateZeros();
 
@@ -1368,7 +1369,9 @@ public class Umap {
       nEpochs = mNEpochs; // 3.0
     }
 
-    MathUtils.zeroEntriesBelowLimit(graph.data(), MathUtils.max(graph.data()) / (float) nEpochs);
+    // Must be the live array: data() hands back a copy, so pruning it would be discarded.
+    final float[] graphData = graph.mutableData();
+    MathUtils.zeroEntriesBelowLimit(graphData, MathUtils.max(graphData) / (float) nEpochs);
     graph = graph.eliminateZeros().toCoo();
 
     final float[] epochsPerSample = makeEpochsPerSample(graph.data(), nEpochs);

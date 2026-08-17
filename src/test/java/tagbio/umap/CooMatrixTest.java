@@ -97,4 +97,40 @@ public class CooMatrixTest extends AbstractMatrixTest {
     final Matrix hmt = m.add(m.transpose());
     assertEquals(hmt, m.addTranspose());
   }
+
+  /**
+   * <code>data()</code> is a defensive copy and <code>mutableData()</code> is not. Writing
+   * through the wrong one silently discards the write, which is how the epoch pruning in
+   * <code>Umap.simplicialSetEmbedding</code> and the intersection in
+   * <code>CsrMatrix.intersect</code> both ended up doing nothing.
+   */
+  public void testMutableDataWritesThroughAndDataDoesNot() {
+    final CooMatrix m = new DefaultMatrix(new float[][]{{1, 2}, {3, 4}}).toCoo();
+
+    m.data()[0] = 99;
+    assertEquals("data() must hand back a copy", 1.0F, m.get(0, 0));
+
+    m.mutableData()[0] = 99;
+    assertEquals("mutableData() must write through", 99.0F, m.get(0, 0));
+  }
+
+  /**
+   * The pruning idiom used before layout optimization: zero the weak entries in place, then
+   * drop them. Before the fix this removed nothing because the threshold was applied to a
+   * copy.
+   */
+  public void testZeroEntriesBelowLimitThenEliminateZeros() {
+    final CooMatrix m = new DefaultMatrix(new float[][]{{1, 20}, {3, 40}}).toCoo();
+    assertEquals(4, m.row().length);
+
+    MathUtils.zeroEntriesBelowLimit(m.mutableData(), MathUtils.max(m.data()) / 10.0F);
+    final Matrix pruned = m.eliminateZeros();
+
+    // Limit is 4.0, so the entries 1 and 3 go and 20 and 40 stay.
+    assertEquals(2, pruned.toCoo().row().length);
+    assertEquals(0.0F, pruned.get(0, 0));
+    assertEquals(0.0F, pruned.get(1, 0));
+    assertEquals(20.0F, pruned.get(0, 1));
+    assertEquals(40.0F, pruned.get(1, 1));
+  }
 }

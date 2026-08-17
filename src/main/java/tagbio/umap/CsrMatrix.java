@@ -162,7 +162,9 @@ class CsrMatrix extends Matrix {
 
     final int[] row = result.row();
     final int[] col = result.col();
-    final float[] data = result.data();
+    // Must be the live array: this method's whole output is written into it, and data()
+    // hands back a copy, so the intersection would be discarded.
+    final float[] data = result.mutableData();
     for (int idx = 0; idx < row.length; ++idx) {
       final int i = row[idx];
       final int j = col[idx];

@@ -242,6 +242,21 @@ class CooMatrix extends Matrix {
     return Arrays.copyOf(mData, mData.length);
   }
 
+  /**
+   * The live data array of this matrix, for in-place modification within the package.
+   * Unlike {@link #data()} this is not a defensive copy: writing through the result changes
+   * the matrix. Callers that only read should use {@code data()}.
+   *
+   * Changing values is safe with respect to the <code>(row, col)</code> ordering this class
+   * maintains. Introducing zeros is only safe when followed by {@link #eliminateZeros()},
+   * because a zero weight reaching {@link Umap#makeEpochsPerSample} becomes a negative
+   * sentinel that is then sampled in every epoch.
+   * @return the internal data array
+   */
+  float[] mutableData() {
+    return mData;
+  }
+
   int[] row() {
     return Arrays.copyOf(mRow, mRow.length);
   }
