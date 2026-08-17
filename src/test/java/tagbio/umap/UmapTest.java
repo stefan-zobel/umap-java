@@ -768,6 +768,7 @@ public class UmapTest extends TestCase {
    * Records which thread asks it for numbers. Negative sampling is the only consumer of the
    * random source inside optimizeLayout, so this sees every worker that does any work.
    */
+  @SuppressWarnings("serial")
   private static final class ThreadRecordingRandom extends Random {
     private final List<Thread> mCallers = new ArrayList<>();
 
