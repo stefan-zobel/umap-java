@@ -85,30 +85,47 @@ public class Umap {
       float mid = 1;
 
       final float[] ithDistances = distances[i];
-      int firstPositive = -1;
+      final int index = (int) Math.floor(localConnectivity);
+      final float interpolation = localConnectivity - index;
+
+      // Rho is taken from the strictly positive entries of the row, addressed by their
+      // ordinal among those entries. Sorted input puts the zeros in a leading run, which
+      // would allow a plain offset, but the positives are deliberately not assumed to be
+      // contiguous: this method is also called with whole distance matrices, whose zero
+      // sits on the diagonal. One pass collects everything the branches below need, so no
+      // intermediate array of the positive values is built.
+      int positiveCount = 0;
       float ithDistanceSum = 0.0F;
+      float maxPositive = 0.0F;
+      float atIndex = 0.0F;          // positive entry with ordinal index, 0-based
+      float beforeIndex = 0.0F;      // positive entry with ordinal index - 1
       for (int j = 0; j < nNeighbors; ++j) {
         final float v = ithDistances[j];
         ithDistanceSum += v;
-        if (firstPositive < 0 && v > 0) {
-          firstPositive = j;
+        if (v > 0) {
+          if (positiveCount == index - 1) {
+            beforeIndex = v;
+          } else if (positiveCount == index) {
+            atIndex = v;
+          }
+          if (v > maxPositive) {
+            maxPositive = v;
+          }
+          ++positiveCount;
         }
       }
-      final int nonZeroLength = firstPositive < 0 ? 0 : nNeighbors - firstPositive;
-      if (nonZeroLength >= localConnectivity) {
-        final int index = (int) Math.floor(localConnectivity);
-        final float interpolation = localConnectivity - index;
+
+      if (positiveCount >= localConnectivity) {
         if (index > 0) {
-          final int base = firstPositive + index - 1;
-          rho[i] = ithDistances[base];
+          rho[i] = beforeIndex;
           if (interpolation > SMOOTH_K_TOLERANCE) {
-            rho[i] += interpolation * (ithDistances[base + 1] - ithDistances[base]);
+            rho[i] += interpolation * (atIndex - beforeIndex);
           }
         } else {
-          rho[i] = interpolation * ithDistances[firstPositive];
+          rho[i] = interpolation * atIndex;
         }
-      } else if (nonZeroLength > 0) {
-        rho[i] = ithDistances[nNeighbors - 1];
+      } else if (positiveCount > 0) {
+        rho[i] = maxPositive;
       }
 
       for (int n = 0; n < nIter; ++n) {
