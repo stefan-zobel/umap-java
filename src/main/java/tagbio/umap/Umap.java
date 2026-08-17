@@ -48,7 +48,8 @@ public class Umap {
    * neighbors that should be assumed to be connected at a local level.
    * The higher this value the more connected the manifold becomes
    * locally. In practice this should be not more than the local intrinsic
-   * dimension of the manifold.
+   * dimension of the manifold. Fractional values are meaningful: the whole part
+   * selects a neighbor and the fraction interpolates linearly towards the next one.
    * @param bandwidth The target bandwidth of the kernel, larger values will produce
    * larger return values.
    * @return two arrays knnDist array of shape <code>(nSamples)</code>
@@ -56,7 +57,7 @@ public class Umap {
    * nnDist: array of shape <code>(nSamples)</code>
    * The distance to the first nearest neighbor for each point.
    */
-  private static float[][] smoothKnnDist(final float[][] distances, final float k, final int nIter, final int localConnectivity, final float bandwidth) {
+  private static float[][] smoothKnnDist(final float[][] distances, final float k, final int nIter, final float localConnectivity, final float bandwidth) {
     return smoothKnnDist(distances, distances[0].length, k, nIter, localConnectivity, bandwidth);
   }
 
@@ -72,7 +73,7 @@ public class Umap {
     return sum / count;
   }
 
-  private static float[][] smoothKnnDist(final float[][] distances, final int nNeighbors, final float k, final int nIter, final int localConnectivity, final float bandwidth) {
+  private static float[][] smoothKnnDist(final float[][] distances, final int nNeighbors, final float k, final int nIter, final float localConnectivity, final float bandwidth) {
     final float target = (float) (MathUtils.log2(k) * bandwidth);
     final float[] rho = new float[distances.length];
     final float[] result = new float[distances.length];
@@ -168,11 +169,11 @@ public class Umap {
     return new float[][]{result, rho};
   }
 
-  static float[][] smoothKnnDist(final float[][] distances, final float k, final int localConnectivity) {
+  static float[][] smoothKnnDist(final float[][] distances, final float k, final float localConnectivity) {
     return smoothKnnDist(distances, k, 64, localConnectivity, 1.0F);
   }
 
-  static float[][] smoothKnnDist(final float[][] distances, final int nNeighbors, final float k, final int localConnectivity) {
+  static float[][] smoothKnnDist(final float[][] distances, final int nNeighbors, final float k, final float localConnectivity) {
     return smoothKnnDist(distances, nNeighbors, k, 64, localConnectivity, 1.0F);
   }
 
@@ -376,7 +377,7 @@ public class Umap {
    * entry of the matrix represents the membership strength of the
    * 1-simplex between the ith and jth sample points.
    */
-  static Matrix fuzzySimplicialSet(final Matrix instances, final int nNeighbors, final Random random, final Metric metric, int[][] knnIndices, float[][] knnDists, final boolean angular, final float setOpMixRatio, final int localConnectivity, final int threads, final boolean verbose) {
+  static Matrix fuzzySimplicialSet(final Matrix instances, final int nNeighbors, final Random random, final Metric metric, int[][] knnIndices, float[][] knnDists, final boolean angular, final float setOpMixRatio, final float localConnectivity, final int threads, final boolean verbose) {
 
     if (knnIndices == null || knnDists == null) {
       final IndexedDistances nn = nearestNeighbors(instances, nNeighbors, metric, angular, random, threads, verbose);
@@ -721,7 +722,7 @@ public class Umap {
   private float mMinDist = 0.1F;
   private float mSpread = 1.0F;
   private float mSetOpMixRatio = 1.0F;
-  private int mLocalConnectivity = 1;
+  private float mLocalConnectivity = 1.0F;
   private int mNegativeSampleRate = 5;
   private float mTransformQueueSize = 4.0F;
   private Metric mTargetMetric = CategoricalMetric.SINGLETON;
@@ -925,8 +926,31 @@ public class Umap {
    * dimension of the manifold. Default 1.
    * @param localConnectivity local connectivity
    * @return this Umap object
+   * @throws IllegalArgumentException if the value is negative
    */
   public Umap setLocalConnectivity(final int localConnectivity) {
+    return setLocalConnectivity((float) localConnectivity);
+  }
+
+  /**
+   * Set the local connectivity required; i.e., the number of nearest
+   * neighbors that should be assumed to be connected at a local level.
+   * The higher this value the more connected the manifold becomes
+   * locally. In practice this should be not more than the local intrinsic
+   * dimension of the manifold, which need not be a whole number. Default 1.
+   *
+   * A fractional value interpolates: its whole part selects a neighbor and the
+   * fraction moves linearly towards the next one, so 1.5 puts the local
+   * connectivity radius halfway between the first and the second nearest
+   * neighbor. A value below 1 scales the distance to the nearest neighbor down.
+   * @param localConnectivity local connectivity
+   * @return this Umap object
+   * @throws IllegalArgumentException if the value is negative or not finite
+   */
+  public Umap setLocalConnectivity(final float localConnectivity) {
+    if (!Float.isFinite(localConnectivity) || localConnectivity < 0.0F) {
+      throw new IllegalArgumentException("Local connectivity must be finite and non-negative.");
+    }
     mLocalConnectivity = localConnectivity;
     return this;
   }
@@ -1358,7 +1382,7 @@ public class Umap {
 
     UmapProgress.update();
 
-    final int adjustedLocalConnectivity = Math.max(0, mLocalConnectivity - 1);
+    final float adjustedLocalConnectivity = Math.max(0.0F, mLocalConnectivity - 1.0F);
     final float[][] sigmasRhos = smoothKnnDist(dists, nNeighbors, nNeighbors, adjustedLocalConnectivity);
     final float[] sigmas = sigmasRhos[0];
     final float[] rhos = sigmasRhos[1];

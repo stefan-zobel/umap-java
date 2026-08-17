@@ -279,6 +279,29 @@ public class UmapTest extends TestCase {
     }
   }
 
+  public void testBadLocalConnectivity() {
+    final Umap umap = new Umap();
+    for (final float bad : new float[] {-0.5F, -1.0F, Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY}) {
+      try {
+        umap.setLocalConnectivity(bad);
+        fail("Accepted local connectivity " + bad);
+      } catch (final IllegalArgumentException e) {
+        assertTrue(e.getMessage(), e.getMessage().contains("Local connectivity"));
+      }
+    }
+    // The int overload delegates, so it rejects negatives too.
+    try {
+      umap.setLocalConnectivity(-1);
+      fail("Accepted local connectivity -1");
+    } catch (final IllegalArgumentException e) {
+      // expected
+    }
+    // Zero and fractional values are legitimate.
+    umap.setLocalConnectivity(0.0F);
+    umap.setLocalConnectivity(1.5F);
+    umap.setLocalConnectivity(2);
+  }
+
   public void testNegativeSampleRate() {
     final Umap umap = new Umap();
     try {
@@ -327,6 +350,48 @@ public class UmapTest extends TestCase {
     final float[][] smooth42 = Umap.smoothKnnDist(distances.toArray(), 4, 2);
     assertArrayEquals(new double[] {0.71514893, 0.25, 0.25, 0.0026791, 0.00247916, 0.00266279, 0.00299635, 0.00269514, 0.00280051, 0.00712167}, smooth42[0]);
     assertArrayEquals(new double[] {0.509902, 0.30000022, 0.30000022, 4.0963397, 3.6864617, 4.236744, 4.9020405, 4.134005, 4.402272, 5.916925}, smooth42[1]);
+  }
+
+  /** Rho for a single row, which is the part of smoothKnnDist that localConnectivity drives. */
+  private float rho(final float[][] distances, final float localConnectivity) {
+    return Umap.smoothKnnDist(distances, 4.0F, localConnectivity)[1][0];
+  }
+
+  /**
+   * A fractional local connectivity interpolates between neighbors. This is only expressible
+   * since the parameter was widened from int to float; with an int the interpolation term is
+   * always zero and both branches below collapse.
+   */
+  public void testSmoothKnnDistFractionalLocalConnectivity() {
+    final float[][] d = {{0, 2, 4, 8}};   // the leading zero is the self match
+
+    // Whole numbers select a neighbor outright.
+    assertEquals(0.0F, rho(d, 0.0F), 1e-6);
+    assertEquals(2.0F, rho(d, 1.0F), 1e-6);
+    assertEquals(4.0F, rho(d, 2.0F), 1e-6);
+
+    // Below one, the distance to the nearest neighbor is scaled down.
+    assertEquals(1.0F, rho(d, 0.5F), 1e-6);
+
+    // Above one, interpolate linearly towards the next neighbor: 2 + 0.5 * (4 - 2).
+    assertEquals(3.0F, rho(d, 1.5F), 1e-6);
+    assertEquals(6.0F, rho(d, 2.5F), 1e-6);   // 4 + 0.5 * (8 - 4)
+  }
+
+  /**
+   * The positive distances are addressed by their ordinal among the positive entries, not by
+   * an offset from the first one, so a row whose zeros are not a leading run still works.
+   * Guards the regression that a contiguous-suffix assumption introduced here once before.
+   */
+  public void testSmoothKnnDistUnsortedRow() {
+    final float[][] d = {{4, 0, 2, 8}};   // positives in row order: 4, 2, 8
+
+    assertEquals(4.0F, rho(d, 1.0F), 1e-6);
+    assertEquals(2.0F, rho(d, 2.0F), 1e-6);
+    assertEquals(3.0F, rho(d, 1.5F), 1e-6);   // 4 + 0.5 * (2 - 4)
+
+    // Fewer positives than required falls back to the largest of them.
+    assertEquals(8.0F, rho(d, 4.0F), 1e-6);
   }
 
   public void testNearestNeighborsPrecomputed() throws IOException {
