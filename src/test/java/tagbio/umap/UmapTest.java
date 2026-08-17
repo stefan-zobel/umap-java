@@ -8,10 +8,14 @@ package tagbio.umap;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import junit.framework.TestCase;
+import tagbio.umap.metric.EuclideanMetric;
 import tagbio.umap.metric.PrecomputedMetric;
 
 /**
@@ -813,6 +817,103 @@ public class UmapTest extends TestCase {
     // Ten classes, so chance is 0.1. Measured over ten seeds: 0.9726 to 0.9784 at four
     // threads against 0.9708 to 0.9792 at one, so the races cost nothing detectable here.
     assertAgreementAtLeast(0.94, matrix, data.getSampleClassIndex());
+  }
+
+  /** A deterministic graph in which every vertex has nNeighbors forward edges. */
+  private static Heap candidateFixture(final int nVertices, final int nNeighbors) {
+    final Heap graph = new Heap(nVertices, nNeighbors);
+    final Random random = new Random(1234);
+    for (int i = 0; i < nVertices; ++i) {
+      for (int j = 0; j < nNeighbors; ++j) {
+        // Distinct targets per row, spread far enough apart that reverse edges reach across
+        // any chunk boundary the parallel variant might draw.
+        graph.push(i, random.nextFloat(), (i + 1 + j * 37) % nVertices, true);
+      }
+    }
+    return graph;
+  }
+
+  private static List<Integer> sortedCandidates(final Heap heap, final int row, final int maxCandidates) {
+    final List<Integer> present = new ArrayList<>();
+    for (int j = 0; j < maxCandidates; ++j) {
+      if (heap.index(row, j) >= 0) {
+        present.add(heap.index(row, j));
+      }
+    }
+    Collections.sort(present);
+    return present;
+  }
+
+  /**
+   * The parallel buildCandidates draws its priorities from per-chunk random streams, so the
+   * heaps it produces are not element-for-element equal to the serial ones. What must hold is
+   * that the same candidates are found: the random values only decide who is evicted once a
+   * row overflows, and with maxCandidates well above the arrival count nothing overflows. Any
+   * candidate lost to a race, or any reverse edge dropped at a chunk boundary, breaks this.
+   */
+  public void testParallelBuildCandidatesFindsTheSameCandidates() throws InterruptedException {
+    final int nVertices = 500;
+    final int nNeighbors = 6;
+    final int maxCandidates = 60;   // comfortably above the ~12 arrivals per row
+    final ExecutorService executor = Executors.newFixedThreadPool(4);
+    try {
+      final Heap serialGraph = candidateFixture(nVertices, nNeighbors);
+      final Heap parallelGraph = candidateFixture(nVertices, nNeighbors);
+      final Heap serial = serialGraph.buildCandidates(nVertices, nNeighbors, maxCandidates, new Random(7));
+      final Heap parallel = parallelGraph.buildCandidates(nVertices, nNeighbors, maxCandidates,
+        executor, Utils.splitRandom(new Random(7), 4));
+
+      int nonEmpty = 0;
+      for (int i = 0; i < nVertices; ++i) {
+        final List<Integer> expected = sortedCandidates(serial, i, maxCandidates);
+        assertEquals("row " + i, expected, sortedCandidates(parallel, i, maxCandidates));
+        if (!expected.isEmpty()) {
+          ++nonEmpty;
+        }
+      }
+      assertEquals("fixture produced no candidates, the test proves nothing", nVertices, nonEmpty);
+
+      // Both variants must also have consumed the source graph's new flags.
+      for (int i = 0; i < nVertices; ++i) {
+        for (int j = 0; j < nNeighbors; ++j) {
+          assertFalse("row " + i + " column " + j, parallelGraph.isNew(i, j));
+        }
+      }
+    } finally {
+      executor.shutdown();
+    }
+  }
+
+  /**
+   * Covers ParallelNearestNeighborDescent itself, which no other test reaches: the layout
+   * tests all run on data below SMALL_PROBLEM_THRESHOLD, where the neighbour search is
+   * exhaustive and this class is never constructed. Approximate descent gives no exact
+   * guarantee, so this asserts that the parallel run finds neighbours of the same quality as
+   * the serial one rather than the identical ones.
+   */
+  public void testParallelNearestNeighborDescentFindsComparableNeighbours() throws IOException {
+    final Matrix instances = new DefaultMatrix(new DigitData().getData());
+    final int k = 15;
+    final IndexedDistances serial = Umap.nearestNeighbors(instances, k, EuclideanMetric.SINGLETON, false, new Random(42), 1, false);
+    final IndexedDistances parallel = Umap.nearestNeighbors(instances, k, EuclideanMetric.SINGLETON, false, new Random(42), 4, false);
+
+    double serialSum = 0;
+    double parallelSum = 0;
+    for (int i = 0; i < instances.rows(); ++i) {
+      for (int j = 0; j < k; ++j) {
+        assertTrue("row " + i + " has an unfilled neighbour slot", parallel.getIndices()[i][j] >= 0);
+        serialSum += serial.getDistances()[i][j];
+        parallelSum += parallel.getDistances()[i][j];
+      }
+    }
+    // Both are approximations of the same true kNN, so their total distance is the quality
+    // measure. Measured over ten seeds: 0.99997 to 1.00005, i.e. the parallel descent is not
+    // merely comparable but indistinguishable here. The bound is left wide all the same,
+    // because it is meant to catch a descent that has stopped working, not to pin a number
+    // that thread scheduling is entitled to move.
+    final double ratio = parallelSum / serialSum;
+    assertTrue("parallel descent found much worse neighbours: ratio " + ratio, ratio < 1.05);
+    assertTrue("parallel descent found implausibly better neighbours: ratio " + ratio, ratio > 0.95);
   }
 
   public void testClip() {

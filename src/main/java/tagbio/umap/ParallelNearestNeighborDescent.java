@@ -112,7 +112,9 @@ class ParallelNearestNeighborDescent extends  NearestNeighborDescent {
           Utils.message("NearestNeighborDescent: " + (n + 1) + " / " + nIters);
         }
 
-        final Heap candidateNeighbors = currentGraph.buildCandidates(nVertices, nNeighbors, maxCandidates, random);
+        // Reuses the job streams rather than splitting fresh ones every iteration; the phases
+        // are separated by barriers, so no stream is ever touched by two threads at once.
+        final Heap candidateNeighbors = currentGraph.buildCandidates(nVertices, nNeighbors, maxCandidates, executor, randoms);
 
         for (int t = 0; t < jobs; ++t) {
           final int lo = t * chunkSize;

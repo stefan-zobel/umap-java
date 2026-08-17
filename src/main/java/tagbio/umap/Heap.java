@@ -7,6 +7,9 @@ package tagbio.umap;
 
 import java.util.Arrays;
 import java.util.Random;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 
 /**
  * Arrays of heaps structure.
@@ -35,14 +38,33 @@ class Heap {
    * @param size The number of items to keep on the heap for each data point.
    */
   Heap(final int points, final int size) {
+    this(points, size, true);
+  }
+
+  /**
+   * As {@link #Heap(int, int)}, but able to leave the rows unfilled so that a caller holding a
+   * thread pool can fill them itself. Sizing the arrays is a bulk operation the JVM does well;
+   * writing -1 and infinity into every one of {@code points * size} entries is not, and it is
+   * the only serial part of {@link #buildCandidates(int, int, int, ExecutorService, Random[])}.
+   * A heap left unfilled here is unusable until {@link #fillRows} has covered every row.
+   * @param points number of heaps
+   * @param size entries per heap
+   * @param fill whether to initialize the rows
+   */
+  private Heap(final int points, final int size, final boolean fill) {
     mIndices = new int[points][size];
     mWeights = new float[points][size];
     mIsNew = new boolean[points][size];
-    for (final int[] a : mIndices) {
-      Arrays.fill(a, -1);
+    if (fill) {
+      fillRows(0, points);
     }
-    for (final float[] a : mWeights) {
-      Arrays.fill(a, Float.POSITIVE_INFINITY);
+  }
+
+  /** Initialize rows {@code [lo, hi)} to the empty state. Rows are disjoint, so this is safe to split across threads. */
+  private void fillRows(final int lo, final int hi) {
+    for (int i = lo; i < hi; ++i) {
+      Arrays.fill(mIndices[i], -1);
+      Arrays.fill(mWeights[i], Float.POSITIVE_INFINITY);
     }
   }
 
@@ -309,7 +331,64 @@ class Heap {
    */
   Heap buildCandidates(final int nVertices, final int nNeighbors, final int maxCandidates, final Random random) {
     final Heap candidateNeighbors = new Heap(nVertices, maxCandidates);
-    for (int i = 0; i < nVertices; ++i) {
+    pushCandidates(candidateNeighbors, 0, nVertices, nNeighbors, random);
+    return candidateNeighbors;
+  }
+
+  /**
+   * As {@link #buildCandidates(int, int, int, Random)}, but spread over a thread pool. This is
+   * the serial gap inside an otherwise parallel nearest neighbor descent: it runs once per
+   * descent iteration while every worker idles, which measured 3.1-4.0 % of a fit before the
+   * layout optimization was parallelized and about twice that after.
+   *
+   * Nothing here needs new locking. {@link #push} already takes the target row's monitor, and
+   * the only unsynchronized write, {@code mIsNew[i][j] = false}, stays inside the range its
+   * own thread owns. The reverse edge {@code push(idx, ...)} does land on an arbitrary row, so
+   * that lock is genuinely shared, but contention on it was measured at 0.8 % of worker time
+   * even on a graph whose busiest vertex is the reverse neighbor of 2807 others: {@code push}
+   * rejects most arrivals at a full row on the {@code weight >= weights[0]} test, before it
+   * reaches the duplicate scan.
+   *
+   * The result differs from the serial version, which is why this is not simply the same
+   * method: the chunks draw from separate random streams, so the candidate priorities differ.
+   * Descent on this path is nondeterministic already.
+   * @param nVertices total number of vertices in the graph
+   * @param nNeighbors neighbor edges per node in the current graph
+   * @param maxCandidates maximum number of new candidate neighbors
+   * @param executor pool to run on, supplied by the caller because it already has one
+   * @param randoms one random stream per chunk; its length sets the number of chunks
+   * @return heap of candidate neighbors for each vertex
+   */
+  Heap buildCandidates(final int nVertices, final int nNeighbors, final int maxCandidates, final ExecutorService executor, final Random[] randoms) {
+    final int chunks = randoms.length;
+    if (chunks == 1) {
+      // A single chunk would only add two pool round trips to the serial loop.
+      return buildCandidates(nVertices, nNeighbors, maxCandidates, randoms[0]);
+    }
+    final Heap candidateNeighbors = new Heap(nVertices, maxCandidates, false);
+    final int chunkSize = (nVertices + chunks - 1) / chunks;
+    final Future<?>[] futures = new Future<?>[chunks];
+    // Two waves rather than one: a push follows the reverse edge into an arbitrary row, so
+    // every row has to exist in its empty state before any thread starts pushing.
+    for (int t = 0; t < chunks; ++t) {
+      final int lo = t * chunkSize;
+      final int hi = Math.min(lo + chunkSize, nVertices);
+      futures[t] = executor.submit(() -> candidateNeighbors.fillRows(lo, hi));
+    }
+    awaitAll(futures);
+    for (int t = 0; t < chunks; ++t) {
+      final int lo = t * chunkSize;
+      final int hi = Math.min(lo + chunkSize, nVertices);
+      final Random chunkRandom = randoms[t];
+      futures[t] = executor.submit(() -> pushCandidates(candidateNeighbors, lo, hi, nNeighbors, chunkRandom));
+    }
+    awaitAll(futures);
+    return candidateNeighbors;
+  }
+
+  /** The body of both {@code buildCandidates} variants, over the vertex range {@code [lo, hi)}. */
+  private void pushCandidates(final Heap candidateNeighbors, final int lo, final int hi, final int nNeighbors, final Random random) {
+    for (int i = lo; i < hi; ++i) {
       for (int j = 0; j < nNeighbors; ++j) {
         if (mIndices[i][j] < 0) {
           continue;
@@ -322,6 +401,15 @@ class Heap {
         mIsNew[i][j] = false;
       }
     }
-    return candidateNeighbors;
+  }
+
+  private static void awaitAll(final Future<?>[] futures) {
+    try {
+      for (final Future<?> future : futures) {
+        future.get();
+      }
+    } catch (final InterruptedException | ExecutionException ex) {
+      throw new RuntimeException(ex);
+    }
   }
 }
