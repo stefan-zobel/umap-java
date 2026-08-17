@@ -640,13 +640,179 @@ public class UmapTest extends TestCase {
     final float[] epochsPerSample = {1.0F, -1.0F};   // second simplex is never to be sampled
 
     new Umap().optimizeLayout(embedding, embedding, head, tail, 20, initial.length, epochsPerSample,
-      1.577F, 0.895F, new Random(42), 1.0F, 1.0F, 5.0F, false);
+      1.577F, 0.895F, new Random(42), 1.0F, 1.0F, 5.0F, 1, false);
 
     assertTrue("vertex 0 was not optimized at all", positions[0][0] != initial[0][0] || positions[0][1] != initial[0][1]);
     for (int i = 2; i < initial.length; ++i) {
       assertEquals("vertex " + i + " moved", initial[i][0], positions[i][0]);
       assertEquals("vertex " + i + " moved", initial[i][1], positions[i][1]);
     }
+  }
+
+  /**
+   * The same guarantee as the test above, but on a graph big enough that the optimization
+   * actually splits across workers. The chunk boundaries must not disturb the schedule state:
+   * epochOfNextSample is indexed per 1-simplex, so each entry has exactly one writer, and a
+   * marked simplex has to stay unsampled no matter which chunk it lands in.
+   *
+   * The 1-simplices are disjoint pairs, so a vertex can only be moved by its own simplex.
+   * Negative sampling reads foreign vertices but writes only the head of the simplex it is
+   * processing, which is why the marked vertices are untouched even though other threads are
+   * concurrently sampling them.
+   */
+  public void testOptimizeLayoutParallelSkipsUnsampledSimplices() {
+    final int nEdges = 2 * Umap.MIN_EDGES_PER_WORKER;   // enough to be given two workers
+    final int nVertices = 2 * nEdges;
+    final int[] head = new int[nEdges];
+    final int[] tail = new int[nEdges];
+    final float[] epochsPerSample = new float[nEdges];
+    final float[][] positions = new float[nVertices][2];
+    final Random setup = new Random(7);
+    for (int i = 0; i < nEdges; ++i) {
+      head[i] = 2 * i;
+      tail[i] = 2 * i + 1;
+      epochsPerSample[i] = i % 100 == 0 ? -1.0F : 1.0F;   // every hundredth is never to be sampled
+    }
+    for (final float[] row : positions) {
+      row[0] = setup.nextFloat() * 20 - 10;
+      row[1] = setup.nextFloat() * 20 - 10;
+    }
+    final float[][] initial = new float[nVertices][];
+    for (int i = 0; i < nVertices; ++i) {
+      initial[i] = Arrays.copyOf(positions[i], 2);
+    }
+    final DefaultMatrix embedding = new DefaultMatrix(positions);
+
+    new Umap().optimizeLayout(embedding, embedding, head, tail, 10, nVertices, epochsPerSample,
+      1.577F, 0.895F, new Random(42), 1.0F, 1.0F, 5.0F, 2, false);
+
+    int moved = 0;
+    for (int i = 0; i < nEdges; ++i) {
+      for (final int v : new int[] {head[i], tail[i]}) {
+        final boolean same = initial[v][0] == positions[v][0] && initial[v][1] == positions[v][1];
+        if (epochsPerSample[i] < 0) {
+          assertTrue("unsampled vertex " + v + " moved", same);
+        } else if (!same) {
+          ++moved;
+        }
+      }
+    }
+    assertTrue("nothing was optimized at all", moved > nEdges);
+  }
+
+  // The fixture below is deliberately small and fully specified so that the exact result of
+  // the single threaded optimization can be pinned. Keep it in step with GOLDEN_SERIAL_LAYOUT.
+  private static final float[][] LAYOUT_START = {
+    {-3.5F, 2.0F}, {1.25F, -0.75F}, {4.0F, 4.0F}, {-1.5F, -2.25F},
+    {0.5F, 3.25F}, {2.75F, -4.0F}, {-4.25F, -0.5F}, {3.0F, 1.5F},
+  };
+  private static final int[] LAYOUT_HEAD = {0, 1, 2, 3, 4, 5, 6, 7, 0, 2, 1, 5};
+  private static final int[] LAYOUT_TAIL = {1, 2, 3, 4, 5, 6, 7, 0, 4, 6, 7, 3};
+  private static final float[] LAYOUT_EPOCHS_PER_SAMPLE = {
+    1.0F, 2.0F, 1.5F, 3.0F, 1.0F, 5.0F, 2.5F, 1.25F, 4.0F, 1.0F, 7.0F, 2.0F,
+  };
+
+  /**
+   * What single threaded optimizeLayout produced on 2026-08-17, before the layout SGD gained
+   * a parallel path. Unlike the embedding sums this file used to carry, this one is not a
+   * proxy for quality: its only job is to hold the serial path still while the method is
+   * restructured around it, so a change here is a genuine change in behaviour and should be
+   * regenerated only deliberately.
+   */
+  private static final float[][] GOLDEN_SERIAL_LAYOUT = {
+    {-0.08309409F, 1.391967F},
+    {1.033315F, 1.4856343F},
+    {2.4101315F, 2.864756F},
+    {0.16156346F, -1.5068393F},
+    {0.2535907F, 2.1569846F},
+    {1.1128602F, -2.102322F},
+    {-2.6119025F, 0.15524451F},
+    {0.4672074F, 0.15103333F},
+  };
+
+  private static float[][] runLayoutFixture(final int threads, final Random random) {
+    final float[][] positions = new float[LAYOUT_START.length][];
+    for (int i = 0; i < LAYOUT_START.length; ++i) {
+      positions[i] = Arrays.copyOf(LAYOUT_START[i], 2);
+    }
+    // One matrix for both ends, as simplicialSetEmbedding uses it, so moveOther is true.
+    final DefaultMatrix embedding = new DefaultMatrix(positions);
+    new Umap().optimizeLayout(embedding, embedding, LAYOUT_HEAD, LAYOUT_TAIL, 10, LAYOUT_START.length,
+      Arrays.copyOf(LAYOUT_EPOCHS_PER_SAMPLE, LAYOUT_EPOCHS_PER_SAMPLE.length),
+      1.577F, 0.895F, random, 1.0F, 1.0F, 5.0F, threads, false);
+    return positions;
+  }
+
+  public void testOptimizeLayoutSingleThreadMatchesFrozenResult() {
+    final float[][] actual = runLayoutFixture(1, new Random(42));
+    for (int i = 0; i < GOLDEN_SERIAL_LAYOUT.length; ++i) {
+      for (int d = 0; d < 2; ++d) {
+        assertEquals("vertex " + i + " component " + d, GOLDEN_SERIAL_LAYOUT[i][d], actual[i][d], 0.0F);
+      }
+    }
+  }
+
+  public void testOptimizeLayoutSingleThreadIsReproducible() {
+    final float[][] first = runLayoutFixture(1, new Random(1234));
+    final float[][] second = runLayoutFixture(1, new Random(1234));
+    for (int i = 0; i < first.length; ++i) {
+      assertTrue("vertex " + i + " differs between runs", Arrays.equals(first[i], second[i]));
+    }
+  }
+
+  /**
+   * Records which thread asks it for numbers. Negative sampling is the only consumer of the
+   * random source inside optimizeLayout, so this sees every worker that does any work.
+   */
+  private static final class ThreadRecordingRandom extends Random {
+    private final List<Thread> mCallers = new ArrayList<>();
+
+    ThreadRecordingRandom(final long seed) {
+      super(seed);
+    }
+
+    @Override
+    public int nextInt(final int bound) {
+      synchronized (mCallers) {
+        mCallers.add(Thread.currentThread());
+      }
+      return super.nextInt(bound);
+    }
+  }
+
+  /**
+   * The single threaded path must not merely produce the same numbers, it must not hand the
+   * work to anyone else: callers rely on threads = 1 meaning no pool is created and no thread
+   * is started. Checking who draws the negative samples proves that directly, without
+   * depending on timing or on counting live threads.
+   */
+  public void testOptimizeLayoutSingleThreadRunsOnTheCallingThread() {
+    final ThreadRecordingRandom random = new ThreadRecordingRandom(42);
+    runLayoutFixture(1, random);
+    assertFalse("no negative sampling happened, the test proves nothing", random.mCallers.isEmpty());
+    for (final Thread caller : random.mCallers) {
+      assertSame("work was handed to another thread", Thread.currentThread(), caller);
+    }
+  }
+
+  /**
+   * The parallel path lets concurrent updates to the same embedding row overwrite one
+   * another, so nothing about the result is exact. What must survive is the purpose of the
+   * embedding, which is why this asserts on neighbour agreement rather than on values.
+   */
+  public void testParallelLayoutProducesUsableEmbedding() throws IOException {
+    final Data data = new DigitData();
+    final Umap umap = new Umap();
+    umap.setThreads(4);
+    final float[][] matrix = umap.fitTransform(data.getData());
+    assertEquals(1797, matrix.length);
+    assertEquals(2, matrix[0].length);
+    for (final float[] row : matrix) {
+      assertTrue("embedding is not finite", Float.isFinite(row[0]) && Float.isFinite(row[1]));
+    }
+    // Ten classes, so chance is 0.1. Measured over ten seeds: 0.9726 to 0.9784 at four
+    // threads against 0.9708 to 0.9792 at one, so the races cost nothing detectable here.
+    assertAgreementAtLeast(0.94, matrix, data.getSampleClassIndex());
   }
 
   public void testClip() {

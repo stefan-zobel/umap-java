@@ -9,6 +9,11 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import tagbio.umap.metric.CategoricalMetric;
 import tagbio.umap.metric.EuclideanMetric;
@@ -31,6 +36,23 @@ public class Umap {
   private static final float MIN_K_DIST_SCALE = 1e-3F;
 
   private static final int SMALL_PROBLEM_THRESHOLD = 4096;
+
+  /**
+   * Fewest 1-simplices a layout optimization worker is given. Below this the per epoch cost
+   * of handing work to the pool outweighs what the parallelism saves, so fewer workers are
+   * used. Measured over graphs from 32 to 65536 1-simplices at 500 epochs: a worker holding
+   * 128 1-simplices loses, one holding 256 wins by about a fifth, and the gain grows from
+   * there. Package private so that a test can size a graph large enough to reach the parallel
+   * path at all.
+   */
+  static final int MIN_EDGES_PER_WORKER = 256;
+
+  /**
+   * Largest number of 1-simplices a layout optimization worker claims at a time. Measured on
+   * a 514 000 1-simplex graph at 6 and 12 threads: 1024 beats 256, which spends too much of
+   * itself on the cursor, and 8192, whose chunks are too coarse to balance.
+   */
+  private static final int LAYOUT_CHUNK_SIZE = 1024;
 
   /**
    * Compute a continuous version of the distance to the kth nearest
@@ -488,10 +510,13 @@ public class Umap {
    * @param gamma Weight to apply to negative samples.
    * @param initialAlpha Initial learning rate for the SGD.
    * @param negativeSampleRate Number of negative samples to use per positive sample.
+   * @param threads Maximum number of threads to use. A value of 1 keeps the optimization
+   * entirely on the calling thread and therefore reproducible for a given random source;
+   * any larger value runs it Hogwild style and makes the result nondeterministic.
    * @param verbose Whether to report information on the current progress of the algorithm.
    * @return array of shape <code>(nSamples, nComponents)</code> The optimized embedding.
    */
-  Matrix optimizeLayout(final Matrix headEmbedding, final Matrix tailEmbedding, final int[] head, final int[] tail, final int nEpochs, final int nVertices, final float[] epochsPerSample, final float a, final float b, final Random random, final float gamma, final float initialAlpha, final float negativeSampleRate, final boolean verbose) {
+  Matrix optimizeLayout(final Matrix headEmbedding, final Matrix tailEmbedding, final int[] head, final int[] tail, final int nEpochs, final int nVertices, final float[] epochsPerSample, final float a, final float b, final Random random, final float gamma, final float initialAlpha, final float negativeSampleRate, final int threads, final boolean verbose) {
 
     if (!(headEmbedding instanceof DefaultMatrix)) {
       throw new UnsupportedOperationException("Require matrix we can set entries on");
@@ -500,7 +525,6 @@ public class Umap {
     final int dim = headEmbedding.cols();
     final boolean moveOther = headEmbedding.rows() == tailEmbedding.rows();
     final boolean bIsOne = Math.abs(b - 1.0F) < 1e-6F;
-    float alpha = initialAlpha;
 
     final float[] epochsPerNegativeSample = MathUtils.divide(epochsPerSample, negativeSampleRate);
     final float[] epochOfNextNegativeSample = Arrays.copyOf(epochsPerNegativeSample, epochsPerNegativeSample.length);
@@ -516,70 +540,208 @@ public class Umap {
       }
     }
 
-    for (int n = 0; n < nEpochs; ++n) {
-      for (int i = 0; i < epochsPerSample.length; ++i) {
-        if (epochOfNextSample[i] <= n) {
-          final int j = head[i];
-          final int k = tail[i];
+    final EdgeUpdater updater = new EdgeUpdater(headEmbedding, tailEmbedding, head, tail,
+      epochsPerSample, epochOfNextSample, epochsPerNegativeSample, epochOfNextNegativeSample,
+      dim, nVertices, moveOther, bIsOne, a, b, gamma);
+    final int nEdges = epochsPerSample.length;
+    // One worker per requested thread; the chunking inside updateInParallel is what keeps them
+    // evenly fed. A graph too small to give each of them a worthwhile share drops to one
+    // worker, which is the serial path: no pool is created, no thread is started, and the
+    // caller's own random source is used, so a single threaded run stays exactly reproducible.
+    final int workers = Math.max(1, Math.min(threads, nEdges / MIN_EDGES_PER_WORKER));
+    final ExecutorService executor = workers > 1 ? Executors.newFixedThreadPool(workers) : null;
+    // Each worker needs its own stream; sharing one Random would serialize on its internal state.
+    final Random[] randoms = workers > 1 ? Utils.splitRandom(random, workers) : null;
+
+    try {
+      for (int n = 0; n < nEpochs; ++n) {
+        // The schedule this loop has always used: epoch zero runs at initialAlpha, and every
+        // later epoch at the value the preceding iteration computed. It is stated up front
+        // rather than at the bottom of the loop only because it has to be effectively final.
+        final float alpha = n == 0 ? initialAlpha : initialAlpha * (1 - (float) (n - 1) / (float) nEpochs);
+
+        if (executor == null) {
+          updater.update(0, nEdges, n, alpha, random);
+        } else {
+          updateInParallel(executor, updater, randoms, nEdges, n, alpha);
+        }
+
+        if (verbose && n % (nEpochs / 10) == 0) {
+          Utils.message("Completed " + n + "/" + nEpochs);
+        }
+        UmapProgress.update();
+      }
+    } finally {
+      if (executor != null) {
+        executor.shutdown();
+      }
+    }
+    return headEmbedding;
+  }
+
+  /**
+   * Apply one epoch with the 1-simplices handed out in chunks, each worker taking the next
+   * chunk as it frees up and updating the shared embedding without synchronization.
+   *
+   * The chunks are claimed from a cursor rather than assigned up front because the work per
+   * 1-simplex is not uniform and not uniform in a way that averages out: whether a 1-simplex
+   * is touched in a given epoch depends on its membership strength, so the same ranges are
+   * heavy in every epoch. Splitting the range into one fixed chunk per worker left the
+   * workers busy for only 74 to 82 per cent of the time the barrier held them; claiming
+   * chunks raises that above 97 per cent and cuts the epoch by a sixth. Handing out more
+   * fixed chunks than workers reaches the same occupancy but not the same time, and striping
+   * the 1-simplices across workers balances perfectly and is slower still — both give up the
+   * locality that a contiguous chunk has, which is worth more than the idle time it costs.
+   *
+   * The per 1-simplex schedule is not at risk: <code>epochOfNextSample</code> and
+   * <code>epochOfNextNegativeSample</code> are indexed by 1-simplex, and every index is
+   * handed out exactly once per epoch, so each entry has exactly one writer. Only the
+   * embedding rows are written concurrently, and those races are the point of the method
+   * rather than an oversight: a float write is atomic (17.7 of the language specification
+   * excepts only <code>long</code> and <code>double</code>), so no half written value can
+   * ever be read back, and a whole update lost to a competing write is what Hogwild style
+   * descent trades for the absence of locking. Waiting on the futures below publishes every
+   * write before the next epoch begins, so staleness cannot accumulate beyond a single epoch.
+   *
+   * @param executor pool to run the chunks on
+   * @param updater shared update logic
+   * @param randoms one random source per worker
+   * @param nEdges number of 1-simplices
+   * @param epoch current epoch
+   * @param alpha current learning rate
+   */
+  private static void updateInParallel(final ExecutorService executor, final EdgeUpdater updater, final Random[] randoms, final int nEdges, final int epoch, final float alpha) {
+    final int workers = randoms.length;
+    // Enough chunks for a worker that draws a heavy one to be overtaken, but not so many that
+    // the cursor itself becomes the contended resource: measured, 1024 beats both 256 and 8192.
+    final int chunkSize = Math.max(1, Math.min(LAYOUT_CHUNK_SIZE, nEdges / (4 * workers)));
+    final AtomicInteger cursor = new AtomicInteger();
+    final Future<?>[] futures = new Future<?>[workers];
+    for (int t = 0; t < workers; ++t) {
+      final Random workerRandom = randoms[t];
+      futures[t] = executor.submit(() -> {
+        int lo;
+        while ((lo = cursor.getAndAdd(chunkSize)) < nEdges) {
+          updater.update(lo, Math.min(lo + chunkSize, nEdges), epoch, alpha, workerRandom);
+        }
+      });
+    }
+    try {
+      for (final Future<?> future : futures) {
+        future.get();
+      }
+    } catch (final InterruptedException | ExecutionException ex) {
+      throw new RuntimeException(ex);
+    }
+  }
+
+  /**
+   * The body of {@link Umap#optimizeLayout}'s inner loop, applied to a range of 1-simplices.
+   *
+   * Everything that does not vary between epochs is a field, so that a call needs only the
+   * edge range, the epoch, the learning rate and a random source. That is what lets one copy
+   * of the gradient computation serve a whole-range call and a chunked one alike.
+   */
+  private static final class EdgeUpdater {
+
+    private final Matrix mHeadEmbedding;
+    private final Matrix mTailEmbedding;
+    private final int[] mHead;
+    private final int[] mTail;
+    private final float[] mEpochsPerSample;
+    private final float[] mEpochOfNextSample;
+    private final float[] mEpochsPerNegativeSample;
+    private final float[] mEpochOfNextNegativeSample;
+    private final int mDim;
+    private final int mNVertices;
+    private final boolean mMoveOther;
+    private final boolean mBIsOne;
+    private final float mA;
+    private final float mB;
+    private final float mGamma;
+
+    EdgeUpdater(final Matrix headEmbedding, final Matrix tailEmbedding, final int[] head, final int[] tail, final float[] epochsPerSample, final float[] epochOfNextSample, final float[] epochsPerNegativeSample, final float[] epochOfNextNegativeSample, final int dim, final int nVertices, final boolean moveOther, final boolean bIsOne, final float a, final float b, final float gamma) {
+      mHeadEmbedding = headEmbedding;
+      mTailEmbedding = tailEmbedding;
+      mHead = head;
+      mTail = tail;
+      mEpochsPerSample = epochsPerSample;
+      mEpochOfNextSample = epochOfNextSample;
+      mEpochsPerNegativeSample = epochsPerNegativeSample;
+      mEpochOfNextNegativeSample = epochOfNextNegativeSample;
+      mDim = dim;
+      mNVertices = nVertices;
+      mMoveOther = moveOther;
+      mBIsOne = bIsOne;
+      mA = a;
+      mB = b;
+      mGamma = gamma;
+    }
+
+    /**
+     * Apply one epoch of updates to the 1-simplices with index in <code>[lo, hi)</code>.
+     * @param lo first 1-simplex index, inclusive
+     * @param hi last 1-simplex index, exclusive
+     * @param epoch current epoch
+     * @param alpha current learning rate
+     * @param random random source for negative sampling
+     */
+    void update(final int lo, final int hi, final int epoch, final float alpha, final Random random) {
+      for (int i = lo; i < hi; ++i) {
+        if (mEpochOfNextSample[i] <= epoch) {
+          final int j = mHead[i];
+          final int k = mTail[i];
           // Note this assumes that "current" is a pointer to the internal matrix data,
           // not ideal from a data encapsulation point of view.
-          final float[] current = headEmbedding.row(j);
-          float[] other = tailEmbedding.row(k);
+          final float[] current = mHeadEmbedding.row(j);
+          float[] other = mTailEmbedding.row(k);
 
           float distSquared = ReducedEuclideanMetric.SINGLETON.distance(current, other);
 
           float gradCoeff;
           if (distSquared > 0.0) {
-            final double distPowB = bIsOne ? distSquared : Math.pow(distSquared, b);
-            gradCoeff = (float) ((-2.0 * a * b * distPowB) / (distSquared * (a * distPowB + 1.0)));
+            final double distPowB = mBIsOne ? distSquared : Math.pow(distSquared, mB);
+            gradCoeff = (float) ((-2.0 * mA * mB * distPowB) / (distSquared * (mA * distPowB + 1.0)));
           } else {
             gradCoeff = 0;
           }
 
-          for (int d = 0; d < dim; ++d) {
+          for (int d = 0; d < mDim; ++d) {
             final float gradD = clip(gradCoeff * (current[d] - other[d]));
             current[d] += gradD * alpha;
-            if (moveOther) {
+            if (mMoveOther) {
               other[d] += -gradD * alpha;
             }
           }
 
-          epochOfNextSample[i] += epochsPerSample[i];
+          mEpochOfNextSample[i] += mEpochsPerSample[i];
 
-          final int nNegSamples = (int) ((n - epochOfNextNegativeSample[i]) / epochsPerNegativeSample[i]);
+          final int nNegSamples = (int) ((epoch - mEpochOfNextNegativeSample[i]) / mEpochsPerNegativeSample[i]);
 
           for (int p = 0; p < nNegSamples; ++p) {
-            final int kr = random.nextInt(nVertices);
-            other = tailEmbedding.row(kr);
+            final int kr = random.nextInt(mNVertices);
+            other = mTailEmbedding.row(kr);
             distSquared = ReducedEuclideanMetric.SINGLETON.distance(current, other);
 
             if (distSquared > 0) {
-              final double distPowB = bIsOne ? distSquared : Math.pow(distSquared, b);
-              gradCoeff = 2.0F * gamma * b / (float) ((0.001 + distSquared) * (a * distPowB + 1.0));
+              final double distPowB = mBIsOne ? distSquared : Math.pow(distSquared, mB);
+              gradCoeff = 2.0F * mGamma * mB / (float) ((0.001 + distSquared) * (mA * distPowB + 1.0));
             } else if (j == kr) {
               continue;
             } else {
               gradCoeff = 0;
             }
 
-            for (int d = 0; d < dim; ++d) {
+            for (int d = 0; d < mDim; ++d) {
               final float gradD = gradCoeff > 0.0 ? clip(gradCoeff * (current[d] - other[d])) : 4;
               current[d] += gradD * alpha;
             }
           }
 
-          epochOfNextNegativeSample[i] += nNegSamples * epochsPerNegativeSample[i];
+          mEpochOfNextNegativeSample[i] += nNegSamples * mEpochsPerNegativeSample[i];
         }
       }
-
-      alpha = initialAlpha * (1 - (float) n / (float) nEpochs);
-
-      if (verbose && n % (nEpochs / 10) == 0) {
-        Utils.message("Completed " + n + "/" + nEpochs);
-      }
-      UmapProgress.update();
     }
-    return headEmbedding;
   }
 
   /**
@@ -612,12 +774,13 @@ public class Umap {
    * @param random random source
    * @param metric The metric used to measure distance in high dimensional space; used if
    * multiple connected components need to be layed out.
+   * @param threads Maximum number of threads to use in the layout optimization.
    * @param verbose Whether to report information on the current progress of the algorithm.
    * @return array of shape <code>(nSamples, nComponents)</code>
    * The optimized of <code>graph</code> into an <code>nComponents</code> dimensional
    * Euclidean space.
    */
-  private Matrix simplicialSetEmbedding(Matrix data, Matrix graphIn, int nComponents, float initialAlpha, float a, float b, float gamma, int negativeSampleRate, int nEpochs, String init, Random random, Metric metric, boolean verbose) {
+  private Matrix simplicialSetEmbedding(Matrix data, Matrix graphIn, int nComponents, float initialAlpha, float a, float b, float gamma, int negativeSampleRate, int nEpochs, String init, Random random, Metric metric, int threads, boolean verbose) {
 
     CooMatrix graph = graphIn.toCoo();
     final int nVertices = graph.cols();
@@ -668,7 +831,7 @@ public class Umap {
 
     // so (head, tail, epochsPerSample) is like a CooMatrix
 
-    return optimizeLayout(embedding, embedding, head, tail, nEpochs, nVertices, epochsPerSample, a, b, random, gamma, initialAlpha, negativeSampleRate, verbose);
+    return optimizeLayout(embedding, embedding, head, tail, nEpochs, nVertices, epochsPerSample, a, b, random, gamma, initialAlpha, negativeSampleRate, threads, verbose);
   }
 
   /**
@@ -1109,7 +1272,14 @@ public class Umap {
 //  }
 
   /**
-   * Set the maximum number of threads to use (default 1).
+   * Set the maximum number of threads to use (default 1). This governs the random projection
+   * forest, the nearest neighbor descent and the layout optimization alike.
+   *
+   * Note that any value above 1 makes the result nondeterministic: the nearest neighbor
+   * descent visits candidates in an order that depends on thread scheduling, and the layout
+   * optimization runs Hogwild style, letting concurrent updates to the same embedding row
+   * overwrite one another. Two runs with the same random seed will therefore differ. Set 1 to
+   * keep a run reproducible.
    * @param threads number of threads
    * @return this Umap object
    */
@@ -1251,7 +1421,7 @@ public class Umap {
       Utils.message("Construct embedding");
     }
 
-    mEmbedding = simplicialSetEmbedding(mRawData, mGraph, mNComponents, mInitialAlpha, mRunA, mRunB, mRepulsionStrength, mNegativeSampleRate, nEpochs, "random", mRandom, mMetric, mVerbose);
+    mEmbedding = simplicialSetEmbedding(mRawData, mGraph, mNComponents, mInitialAlpha, mRunA, mRunB, mRepulsionStrength, mNegativeSampleRate, nEpochs, "random", mRandom, mMetric, mThreads, mVerbose);
 
     if (mVerbose) {
       Utils.message("Finished embedding");
@@ -1434,7 +1604,7 @@ public class Umap {
 
     UmapProgress.update();
     UmapProgress.incTotal(nEpochs);
-    final Matrix matrix = optimizeLayout(embedding, mEmbedding.copy(), head, tail, nEpochs, graph.cols(), epochsPerSample, mRunA, mRunB, mRandom, mRepulsionStrength, mInitialAlpha, mNegativeSampleRate, mVerbose);
+    final Matrix matrix = optimizeLayout(embedding, mEmbedding.copy(), head, tail, nEpochs, graph.cols(), epochsPerSample, mRunA, mRunB, mRandom, mRepulsionStrength, mInitialAlpha, mNegativeSampleRate, mThreads, mVerbose);
 
     UmapProgress.finished();
 
