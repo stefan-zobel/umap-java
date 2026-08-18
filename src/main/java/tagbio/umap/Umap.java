@@ -224,7 +224,7 @@ public class Umap {
     if (metric.equals(PrecomputedMetric.SINGLETON)) {
       // Note that this does not support sparse distance matrices yet ...
       // Compute indices of n nearest neighbors
-      knnIndices = Utils.fastKnnIndices(instances, nNeighbors);
+      knnIndices = Utils.fastKnnIndices(instances, nNeighbors, threads);
       // Compute the nearest neighbor distances
       knnDists = new float[knnIndices.length][nNeighbors];
       for (int i = 0; i < knnDists.length; ++i) {

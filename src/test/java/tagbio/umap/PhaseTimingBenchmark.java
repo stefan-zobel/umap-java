@@ -210,7 +210,7 @@ public final class PhaseTimingBenchmark {
 
     // Umap.nearestNeighbors with PrecomputedMetric: fastKnnIndices plus a gather.
     start();
-    final int[][] knnIndices = Utils.fastKnnIndices(dmat, nNeighbors);
+    final int[][] knnIndices = Utils.fastKnnIndices(dmat, nNeighbors, threads);
     stop("fastKnnIndices");
 
     start();

@@ -5,7 +5,6 @@
  */
 package tagbio.umap;
 
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -74,7 +73,7 @@ public class PairwiseDistances {
         final int start = t;
         futures[t] = executor.submit(() -> computeRows(distances, rows, metric, start, workers));
       }
-      awaitAll(futures);
+      Utils.awaitAll(futures);
     } finally {
       executor.shutdown();
     }
@@ -107,16 +106,6 @@ public class PairwiseDistances {
         distances[k][j] = d;
         distances[j][k] = d;
       }
-    }
-  }
-
-  private static void awaitAll(final Future<?>[] futures) {
-    try {
-      for (final Future<?> future : futures) {
-        future.get();
-      }
-    } catch (final InterruptedException | ExecutionException ex) {
-      throw new RuntimeException(ex);
     }
   }
 

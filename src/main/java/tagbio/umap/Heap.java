@@ -7,7 +7,6 @@ package tagbio.umap;
 
 import java.util.Arrays;
 import java.util.Random;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 
@@ -375,14 +374,14 @@ class Heap {
       final int hi = Math.min(lo + chunkSize, nVertices);
       futures[t] = executor.submit(() -> candidateNeighbors.fillRows(lo, hi));
     }
-    awaitAll(futures);
+    Utils.awaitAll(futures);
     for (int t = 0; t < chunks; ++t) {
       final int lo = t * chunkSize;
       final int hi = Math.min(lo + chunkSize, nVertices);
       final Random chunkRandom = randoms[t];
       futures[t] = executor.submit(() -> pushCandidates(candidateNeighbors, lo, hi, nNeighbors, chunkRandom));
     }
-    awaitAll(futures);
+    Utils.awaitAll(futures);
     return candidateNeighbors;
   }
 
@@ -403,13 +402,4 @@ class Heap {
     }
   }
 
-  private static void awaitAll(final Future<?>[] futures) {
-    try {
-      for (final Future<?> future : futures) {
-        future.get();
-      }
-    } catch (final InterruptedException | ExecutionException ex) {
-      throw new RuntimeException(ex);
-    }
-  }
 }
