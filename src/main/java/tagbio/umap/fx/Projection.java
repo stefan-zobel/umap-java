@@ -12,13 +12,16 @@ final class Projection {
   private final int mNeighbours;
   private final float mMinDist;
   private final float mSpread;
+  private final int mThreads;
 
-  Projection(final PointData data, final float[][] embedding, final int neighbours, final float minDist, final float spread) {
+  Projection(final PointData data, final float[][] embedding, final int neighbours, final float minDist,
+             final float spread, final int threads) {
     mData = data;
     mEmbedding = embedding;
     mNeighbours = neighbours;
     mMinDist = minDist;
     mSpread = spread;
+    mThreads = threads;
   }
 
   /**
@@ -59,5 +62,14 @@ final class Projection {
    */
   float getSpread() {
     return mSpread;
+  }
+
+  /**
+   * The thread count this embedding was computed with, which decides whether it could be
+   * reproduced at all: only a single threaded run repeats.
+   * @return the number of threads used
+   */
+  int getThreads() {
+    return mThreads;
   }
 }

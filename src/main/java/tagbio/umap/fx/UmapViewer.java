@@ -2,6 +2,7 @@ package tagbio.umap.fx;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 
@@ -15,11 +16,13 @@ import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Separator;
 import javafx.scene.control.Slider;
+import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
@@ -74,6 +77,13 @@ public final class UmapViewer extends Application {
   /** System property carrying the requested thread count; the POM passes it through. */
   static final String THREADS_PROPERTY = "umap.threads";
 
+  /**
+   * Logical cores, read once. It is both the largest thread count the dropdown offers and the
+   * cap on what the POM may ask for, so there is no setting under which the viewer can ask for
+   * more threads than the machine has.
+   */
+  private static final int CORES = Math.max(1, Runtime.getRuntime().availableProcessors());
+
   private final EmbeddingCanvas mCanvas = new EmbeddingCanvas();
   private final Legend mLegend = new Legend();
   private final ProgressBar mProgressBar = new ProgressBar(0);
@@ -88,18 +98,31 @@ public final class UmapViewer extends Application {
   private final Label mSpreadValue = new Label();
   private final Label mPointsValue = new Label();
 
+  /**
+   * Threads the next projection may use, one to the logical core count. What it starts on comes
+   * from {@link #resolveThreads}; from then on it is the user's to change, and changing it
+   * recomputes like any other control. Anything above one trades the reproducible embedding
+   * away, which is why the count is on screen next to the picture rather than only in the POM.
+   */
+  private final ComboBox<Integer> mThreadChoice = new ComboBox<>();
+
+  /**
+   * Runs the same settings again. Every other control recomputes as a side effect of changing
+   * something, so without this there is no way to ask for a second run of one configuration -
+   * and that is the only way to see what the thread count costs. The two pictures are drawn in
+   * the same frame, because a new projection resets the view.
+   *
+   * <p>Measured on the 1797 digits at the viewer's own settings, twice at each count: at one
+   * thread 0 of 3594 coordinates differ, and at six all 3594 do, by 3.6 on average against a
+   * map about 13 across. So the difference the button shows is a quarter of the plot, not a
+   * last-bit wobble - which is what makes it worth a button rather than a footnote.
+   */
+  private final Button mRecompute = new Button("Recompute");
+
   /** Set when the argument names a directory holding the MNIST IDX pair. */
   private File mMnistDirectory;
   /** Set when the argument names a delimited data file. */
   private String mDataFile;
-
-  /**
-   * Threads the projection may use, fixed for the session because it comes from a system
-   * property. Anything above one trades the reproducible embedding away, so the status line
-   * says when that has happened.
-   */
-  private final int mThreads =
-    resolveThreads(requestedThreads(), Runtime.getRuntime().availableProcessors());
 
   /** False when the source fixes the point count, so that no fit may re-enable the slider. */
   private boolean mPointsAdjustable;
@@ -204,9 +227,19 @@ public final class UmapViewer extends Application {
     wireRecompute(mMinDistSlider, this::updateMinDistLabel);
     wireRecompute(mSpreadSlider, this::spreadChanged);
     wireRecompute(mPointsSlider, this::updatePointsLabel);
+    configureThreadChoice();
 
     mLegend.setOnVisibilityChanged(() -> mCanvas.setVisibleClasses(mLegend.getVisible()));
 
+    mRecompute.setOnAction(event -> refit());
+    // Dead until there is something to recompute. The sliders can afford to be live with no
+    // data because moving one is not an instruction to do anything; pressing a button is, and
+    // a button that answers nothing reads as a broken one. The first fit to finish - or fail -
+    // enables it through setControlsDisabled.
+    mRecompute.setDisable(true);
+    mRecompute.setTooltip(new Tooltip(
+      "Project the same data with the same settings again.\n"
+        + "At one thread the picture is identical; above one it is not."));
     final Button resetView = new Button("Reset view");
     resetView.setOnAction(event -> mCanvas.resetView());
     final Button exportPng = new Button("Export PNG...");
@@ -222,6 +255,8 @@ public final class UmapViewer extends Application {
 
     final HBox actions = new HBox(10,
       new Label("Points"), mPointsSlider, mPointsValue,
+      new Separator(Orientation.VERTICAL),
+      new Label("Threads"), mThreadChoice, mRecompute,
       new Separator(Orientation.VERTICAL),
       resetView, exportPng);
     actions.setAlignment(Pos.CENTER_LEFT);
@@ -246,6 +281,18 @@ public final class UmapViewer extends Application {
     root.setRight(legendPane);
     root.setBottom(statusBar);
     return root;
+  }
+
+  /**
+   * Fill the thread dropdown and select what the POM asked for.
+   *
+   * <p>The selection is made before the listener is attached, so that starting up does not
+   * itself look like a change and queue a projection the viewer has no data for yet.
+   */
+  private void configureThreadChoice() {
+    mThreadChoice.getItems().setAll(threadChoices(CORES));
+    mThreadChoice.setValue(resolveThreads(requestedThreads(), CORES));
+    mThreadChoice.valueProperty().addListener((observable, oldValue, newValue) -> refit());
   }
 
   private static void configureSlider(final Slider slider, final double tickUnit) {
@@ -326,37 +373,73 @@ public final class UmapViewer extends Application {
   }
 
   /**
-   * The thread count asked for through {@value #THREADS_PROPERTY}, or zero when it was not set
-   * or does not parse as an integer. A malformed value is treated as absent rather than fatal:
-   * it is a tuning knob, and refusing to start over it would be out of proportion.
+   * Threads the next projection will use, as chosen in the dropdown.
    *
-   * @return the requested count, zero meaning nothing was requested
+   * @return the selected count, never below one
    */
-  static int requestedThreads() {
-    final Integer requested = Integer.getInteger(THREADS_PROPERTY);
-    return requested == null ? 0 : requested;
+  private int threads() {
+    final Integer selected = mThreadChoice.getValue();
+    return selected == null ? 1 : selected;
   }
 
   /**
-   * How many threads a projection will actually use.
+   * The thread count asked for through {@value #THREADS_PROPERTY}, or null when the property
+   * carries nothing usable - absent, empty, or not an integer. A malformed value is treated as
+   * absent rather than fatal: it is a tuning knob, and refusing to start over it would be out
+   * of proportion.
    *
-   * <p>At or below zero this is one, which is the only setting under which the embedding is
-   * reproducible. Above zero it is <code>min(requested, cores)</code>: the request is honoured
-   * up to what the machine has, and asking for more threads than there are cores gets the core
-   * count rather than oversubscribing it.
+   * @return the requested count, or null if nothing was requested
+   */
+  static Integer requestedThreads() {
+    return Integer.getInteger(THREADS_PROPERTY);
+  }
+
+  /**
+   * How many threads the viewer starts on. The dropdown can change it afterwards; this only
+   * decides what it is set to before anyone touches it.
+   *
+   * <p>The property saying nothing and the property saying one are different requests, and are
+   * answered differently. <b>A value in the POM</b> is deliberate and keeps the rule it always
+   * had: <code>min(requested, cores)</code>, honoured up to what the machine actually has, and
+   * at or below zero it is one - the only setting under which the embedding is reproducible.
+   * <b>Nothing in the POM</b> is not a request for one thread, it is no request at all, and the
+   * viewer then starts on <code>max(1, cores / 2)</code>: worth having over one thread, and it
+   * leaves the machine usable while a fit that can run for a minute is running.
    *
    * <p>The core count is a parameter rather than read here so that the rule can be asserted
    * without depending on the machine running the test.
    *
-   * @param requested the value of the system property, zero if unset
+   * @param requested the value of the system property, null if nothing was configured
    * @param cores the number of logical cores available
-   * @return the thread count to hand to Umap, never below one
+   * @return the thread count to start on, never below one and never above the core count
    */
-  static int resolveThreads(final int requested, final int cores) {
+  static int resolveThreads(final Integer requested, final int cores) {
+    final int available = Math.max(cores, 1);
+    if (requested == null) {
+      return Math.max(1, available / 2);
+    }
     if (requested <= 0) {
       return 1;
     }
-    return Math.min(requested, Math.max(cores, 1));
+    return Math.min(requested, available);
+  }
+
+  /**
+   * The thread counts the dropdown offers, one to the logical core count.
+   *
+   * <p>Built here rather than in the caller so that the offered range can be asserted without a
+   * JavaFX toolkit - and with it the one thing that would show as an empty box on screen, that
+   * {@link #resolveThreads} always returns a value this list contains.
+   *
+   * @param cores the number of logical cores available
+   * @return the counts to offer, always starting at one
+   */
+  static List<Integer> threadChoices(final int cores) {
+    final List<Integer> choices = new ArrayList<>();
+    for (int threads = 1; threads <= Math.max(cores, 1); ++threads) {
+      choices.add(threads);
+    }
+    return choices;
   }
 
   private static String dataArgument(final List<String> args) {
@@ -378,13 +461,22 @@ public final class UmapViewer extends Application {
     startFit(() -> settings.project(loader.call()));
   }
 
-  /** What the run about to start was asked for, for the status line while it is running. */
+  /**
+   * What the run about to start was asked for, for the status line while it is running.
+   *
+   * <p>The thread count is named only when it is more than one, because that is when it is
+   * worth knowing: it is the number the elapsed seconds next to it have to be read against.
+   */
   private String describeRequest() {
     final StringBuilder text = new StringBuilder();
     if (mMnistDirectory != null) {
       text.append(points()).append(" points, ");
     }
-    return text.append("neighbours ").append(neighbours()).toString();
+    text.append("neighbours ").append(neighbours());
+    if (threads() > 1) {
+      text.append(", ").append(threads()).append(" threads");
+    }
+    return text.toString();
   }
 
   /**
@@ -405,11 +497,11 @@ public final class UmapViewer extends Application {
   }
 
   /**
-   * Read the slider values on the application thread, where JavaFX properties belong, and
+   * Read the control values on the application thread, where JavaFX properties belong, and
    * hand the background thread a fixed set of parameters.
    */
   private Settings currentSettings() {
-    return new Settings(neighbours(), minDist(), spread(), mThreads);
+    return new Settings(neighbours(), minDist(), spread(), threads());
   }
 
   /**
@@ -468,13 +560,13 @@ public final class UmapViewer extends Application {
       mCanvas.setProjection(projection);
       mLegend.setClasses(projection.getData().getClassNames());
       mProgressBar.setProgress(1);
-      // Reported from the projection, not from the sliders: the two can differ if the
-      // sliders moved again while this fit was running.
-      final String threads = mThreads > 1
+      // Reported from the projection, not from the controls: the two can differ if a control
+      // moved again while this fit was running. That now includes the thread count.
+      final String threads = projection.getThreads() > 1
         // Worth saying every time rather than once at startup: with more than one thread the
         // same settings give a different picture on the next run, so two maps being unalike is
         // no longer evidence that anything was changed.
-        ? String.format("  [%d threads, embedding not reproducible]", mThreads)
+        ? String.format("  [%d threads, embedding not reproducible]", projection.getThreads())
         : "";
       mStatus.setText(String.format("%d points, %d classes, neighbours %d, min dist %.2f, spread %.2f%s",
         projection.getEmbedding().length, projection.getData().getClassNames().length,
@@ -531,6 +623,8 @@ public final class UmapViewer extends Application {
     mNeighbourSlider.setDisable(disabled);
     mMinDistSlider.setDisable(disabled);
     mSpreadSlider.setDisable(disabled);
+    mThreadChoice.setDisable(disabled);
+    mRecompute.setDisable(disabled);
     // A source that fixes the point count leaves the slider disabled throughout.
     if (mPointsAdjustable) {
       mPointsSlider.setDisable(disabled);
@@ -555,8 +649,8 @@ public final class UmapViewer extends Application {
       // A fixed seed on a single thread keeps the picture reproducible; more than one thread
       // makes the embedding differ between runs. One thread is fast enough for everything this
       // viewer offers - all 60 000 MNIST images project in under a minute at the default
-      // neighbour count - which is why it is the default and why anything else has to be asked
-      // for deliberately through the umap.threads property.
+      // neighbour count - so the choice is a genuine trade rather than a necessity, which is
+      // why it is made in the dropdown and reported in the status line.
       final Umap umap = new Umap()
         .setNumberComponents(2)
         .setNumberNearestNeighbours(mNeighbours)
@@ -564,7 +658,7 @@ public final class UmapViewer extends Application {
         .setSpread(mSpread)
         .setSeed(SEED)
         .setThreads(mThreads);
-      return new Projection(data, umap.fitTransform(data.getData()), mNeighbours, mMinDist, mSpread);
+      return new Projection(data, umap.fitTransform(data.getData()), mNeighbours, mMinDist, mSpread, mThreads);
     }
   }
 }
