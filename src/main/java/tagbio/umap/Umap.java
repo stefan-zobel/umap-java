@@ -1543,7 +1543,7 @@ public class Umap {
           }
         }
       }
-      final Heap result = mSearch.initializedNndSearch(mRawData, mSearchGraph, init, instances).deheapSort();
+      final Heap result = mSearch.initializedNndSearch(mRawData, mSearchGraph, init, instances, mThreads).deheapSort();
       indices = result.indices();
       dists = result.weights();
     }

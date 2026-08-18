@@ -9,8 +9,12 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -1023,6 +1027,283 @@ public class UmapTest extends TestCase {
       assertEquals("at [0][" + j + "]", Float.floatToRawIntBits(serial.get(0, j)),
         Float.floatToRawIntBits(distances.get(0, j)));
     }
+  }
+
+  /** Heap width the search of a transform uses: nNeighbors times the transform queue size. */
+  private static final int SEARCH_HEAP_WIDTH = 20;
+
+  /**
+   * The pieces {@link NearestNeighborSearch#initializedNndSearch} walks over, built the way a
+   * transform builds them but without a fit: an exact neighbour graph of the training data, and
+   * a heap of starting candidates for each query row.
+   *
+   * <p>Deliberately free of approximation. The descent and the random projection forest that a
+   * real fit uses are not reproducible at more than one thread, which would make it impossible to
+   * tell a defect in the walk from ordinary approximation; here the graph is the exact kNN and
+   * the only randomness is a seeded {@link Random} used identically for every run.
+   *
+   * @param trainRows instances the model would have been fit on
+   * @param queryRows instances being transformed
+   * @param cols dimension of both
+   * @return the training data, the query data, and the search graph
+   */
+  private static Object[] searchFixture(final int trainRows, final int queryRows, final int cols) {
+    final Random random = new Random(1234);
+    final float[][] train = new float[trainRows][cols];
+    final float[][] query = new float[queryRows][cols];
+    for (final float[][] data : new float[][][] {train, query}) {
+      for (final float[] row : data) {
+        for (int j = 0; j < cols; ++j) {
+          row[j] = random.nextFloat();
+        }
+      }
+    }
+    final Matrix trainMatrix = new DefaultMatrix(train);
+    final Matrix distances = PairwiseDistances.pairwiseDistances(trainMatrix, EuclideanMetric.SINGLETON);
+    final int[][] knnIndices = Utils.fastKnnIndices(distances, 6, 1);
+    final SearchGraph searchGraph = new SearchGraph(trainRows);
+    for (int i = 0; i < trainRows; ++i) {
+      for (final int neighbour : knnIndices[i]) {
+        if (neighbour != i) {
+          searchGraph.set(i, neighbour);
+        }
+      }
+    }
+    return new Object[] {trainMatrix, new DefaultMatrix(query), searchGraph};
+  }
+
+  /** A heap of starting candidates, identical for every run because the seed is. */
+  private static Heap searchInitialization(final NearestNeighborSearch search, final Matrix train, final Matrix query) {
+    final Heap heap = new Heap(query.rows(), SEARCH_HEAP_WIDTH);
+    search.randomInit(SEARCH_HEAP_WIDTH, train, query, heap, new Random(7));
+    return heap;
+  }
+
+  /**
+   * The graph walk owes the strongest guarantee of any measure taken so far: a worker owns its
+   * heap rows and its own visited array, nothing else is shared and no random number is drawn, so
+   * dividing the query rows cannot change a single bit. That is what makes this measure free of
+   * the reproducibility cost the parallel descent pays, so it is asserted at five thread counts
+   * rather than assumed from the argument.
+   */
+  public void testInitializedNndSearchParallelMatchesSerial() {
+    final int trainRows = 600;
+    final int cols = 12;
+    // Enough query rows that queryRows * heapWidth * cols clears the floor; below it every call
+    // would fall to the serial path and the comparison would be against itself.
+    final int queryRows = (int) (NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK / ((long) SEARCH_HEAP_WIDTH * cols)) + 26;
+    final Object[] fixture = searchFixture(trainRows, queryRows, cols);
+    final Matrix train = (Matrix) fixture[0];
+    final Matrix query = (Matrix) fixture[1];
+    final SearchGraph searchGraph = (SearchGraph) fixture[2];
+    final NearestNeighborSearch search = new NearestNeighborSearch(EuclideanMetric.SINGLETON);
+
+    final Heap serial = search.initializedNndSearch(train, searchGraph, searchInitialization(search, train, query), query, 1).deheapSort();
+    // The row count is 299, which none of these divides, so every worker ends on a ragged block.
+    for (final int threads : new int[] {1, 2, 3, 7, 16}) {
+      final Heap parallel = search.initializedNndSearch(train, searchGraph, searchInitialization(search, train, query), query, threads).deheapSort();
+      for (int i = 0; i < queryRows; ++i) {
+        for (int j = 0; j < SEARCH_HEAP_WIDTH; ++j) {
+          assertEquals("threads=" + threads + " index at [" + i + "][" + j + "]",
+            serial.index(i, j), parallel.index(i, j));
+          assertEquals("threads=" + threads + " weight at [" + i + "][" + j + "]",
+            Float.floatToRawIntBits(serial.weights()[i][j]), Float.floatToRawIntBits(parallel.weights()[i][j]));
+        }
+      }
+    }
+    // Two runs agreeing on garbage would still pass the loop above: the walk must actually have
+    // improved on the random starting candidates.
+    final Heap start = searchInitialization(search, train, query).deheapSort();
+    int improved = 0;
+    for (int i = 0; i < queryRows; ++i) {
+      assertTrue("row " + i + " lost its nearest candidate", serial.weights()[i][0] <= start.weights()[i][0]);
+      if (serial.weights()[i][0] < start.weights()[i][0]) {
+        ++improved;
+      }
+    }
+    assertTrue("the walk found nothing at all, the comparison proves nothing", improved > queryRows / 2);
+  }
+
+  /** Records which threads computed distances against each query row, by array identity. */
+  private static final class RowOwnershipMetric extends MinkowskiMetric {
+    private final Map<float[], Set<Thread>> mOwners = new IdentityHashMap<>();
+
+    private RowOwnershipMetric() {
+      super(2.0);
+    }
+
+    @Override
+    public float distance(final float[] x, final float[] y) {
+      // The walk passes the query row as the second argument; a DefaultMatrix hands out the
+      // backing array, so identity is enough to tell the rows apart.
+      synchronized (mOwners) {
+        mOwners.computeIfAbsent(y, k -> new HashSet<>()).add(Thread.currentThread());
+      }
+      return super.distance(x, y);
+    }
+  }
+
+  /**
+   * The exactness of the walk rests on a property comparing results can only see indirectly:
+   * every query row is walked, and by exactly one thread. This asserts it directly.
+   *
+   * <p>What it cannot see, stated so that nobody mistakes it for a stronger guarantee than it is:
+   * a split that hands the same row to two workers survives this test as well as every other one.
+   * Walking a row a second time computes no distance at all -- the first walk cleared every flag
+   * the second would follow -- so it is invisible both in the result and in who computed what,
+   * and the two workers that would share a row meet at a block boundary, one reaching it first
+   * and the other last, so they do not collide in time either. That is a latent race producing
+   * correct answers, which is a thing no result-based test can catch; it is recorded in
+   * mutate-s5c.ps1 rather than papered over here.
+   */
+  public void testInitializedNndSearchDividesTheQueryRowsExactlyOnce() {
+    final int cols = 12;
+    final int queryRows = (int) (NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK / ((long) SEARCH_HEAP_WIDTH * cols)) + 26;
+    final Object[] fixture = searchFixture(600, queryRows, cols);
+    final Matrix train = (Matrix) fixture[0];
+    final Matrix query = (Matrix) fixture[1];
+    final RowOwnershipMetric metric = new RowOwnershipMetric();
+    final NearestNeighborSearch search = new NearestNeighborSearch(metric);
+    final Heap initialization = searchInitialization(search, train, query);
+    // randomInit computes a distance for every query row on the calling thread, which would give
+    // each row a second owner before the walk has even started.
+    metric.mOwners.clear();
+    search.initializedNndSearch(train, (SearchGraph) fixture[2], initialization, query, 7);
+
+    assertEquals("some query row was never walked", queryRows, metric.mOwners.size());
+    final Set<Thread> workers = new HashSet<>();
+    for (final Map.Entry<float[], Set<Thread>> entry : metric.mOwners.entrySet()) {
+      assertEquals("a query row was walked by " + entry.getValue().size() + " threads", 1, entry.getValue().size());
+      workers.addAll(entry.getValue());
+    }
+    // Without this the assertion above would also hold for a run that never left one thread.
+    assertTrue("the rows were never actually divided, the test proves nothing", workers.size() > 1);
+  }
+
+  /**
+   * The floor changes no value at all, so a comparison of results cannot see it. Checking who
+   * computed the distances proves directly both that threads = 1 starts no pool and that a
+   * problem too small to repay one does not either, whatever is asked for.
+   */
+  public void testInitializedNndSearchBelowTheFloorRunsOnTheCallingThread() {
+    final Object[] fixture = searchFixture(600, 300, 12);
+    final Matrix train = (Matrix) fixture[0];
+    final Matrix query = (Matrix) fixture[1];
+    final SearchGraph searchGraph = (SearchGraph) fixture[2];
+
+    final ThreadRecordingMetric metric = new ThreadRecordingMetric();
+    final NearestNeighborSearch single = new NearestNeighborSearch(metric);
+    single.initializedNndSearch(train, searchGraph, searchInitialization(single, train, query), query, 1);
+    assertFalse("no distance was computed, the test proves nothing", metric.mCallers.isEmpty());
+    for (final Thread caller : metric.mCallers) {
+      assertSame("work was handed to another thread", Thread.currentThread(), caller);
+    }
+
+    final Object[] small = searchFixture(600, 8, 12);
+    assertTrue("fixture is not below the floor",
+      8L * SEARCH_HEAP_WIDTH * 12 < NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK);
+    final ThreadRecordingMetric belowThreshold = new ThreadRecordingMetric();
+    final NearestNeighborSearch tiny = new NearestNeighborSearch(belowThreshold);
+    tiny.initializedNndSearch((Matrix) small[0], (SearchGraph) small[2],
+      searchInitialization(tiny, (Matrix) small[0], (Matrix) small[1]), (Matrix) small[1], 6);
+    assertFalse("no distance was computed, the test proves nothing", belowThreshold.mCallers.isEmpty());
+    for (final Thread caller : belowThreshold.mCallers) {
+      assertSame("a pool was started for a problem too small to repay it", Thread.currentThread(), caller);
+    }
+  }
+
+  /**
+   * Transforming a single new instance clears the work threshold as soon as the model is wide
+   * enough, but it has one row to divide and a pool cannot repay itself on it. The worker count
+   * is capped at the rows available, which sends this case to the calling thread; that cap is the
+   * only thing protecting it, so it is asserted rather than assumed.
+   */
+  public void testInitializedNndSearchWithOneQueryRow() {
+    final int cols = 4096;
+    final Object[] fixture = searchFixture(200, 1, cols);
+    assertTrue("fixture does not reach the parallel path",
+      (long) SEARCH_HEAP_WIDTH * cols >= NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK);
+    final ThreadRecordingMetric metric = new ThreadRecordingMetric();
+    final NearestNeighborSearch search = new NearestNeighborSearch(metric);
+    search.initializedNndSearch((Matrix) fixture[0], (SearchGraph) fixture[2],
+      searchInitialization(search, (Matrix) fixture[0], (Matrix) fixture[1]), (Matrix) fixture[1], 16);
+    assertFalse("no distance was computed, the test proves nothing", metric.mCallers.isEmpty());
+    for (final Thread caller : metric.mCallers) {
+      assertSame("a pool was started for a single query row", Thread.currentThread(), caller);
+    }
+  }
+
+  /**
+   * Well separated clusters with known labels, enough rows to take the large-data branch.
+   *
+   * <p>The centers are the bit patterns of the cluster index rather than random points, so any
+   * two of them differ by 8 in at least one coordinate while the noise around them has a standard
+   * deviation of a quarter. Drawing centers at random instead makes the difficulty of the fixture
+   * itself depend on the seed -- measured over seven seeds the resulting agreement ranged from
+   * 0.66 to 0.94, which would force a threshold so low it could no longer tell a working branch
+   * from a broken one.
+   */
+  private static float[][] clusterFixture(final int rows, final int cols, final int[] labels, final long seed) {
+    final Random random = new Random(seed);
+    final int clusters = 10;
+    final float[][] centers = new float[clusters][cols];
+    for (int c = 0; c < clusters; ++c) {
+      for (int j = 0; j < cols; ++j) {
+        centers[c][j] = ((c >> j) & 1) == 1 ? 4 : -4;
+      }
+    }
+    final float[][] data = new float[rows][cols];
+    for (int i = 0; i < rows; ++i) {
+      final int cluster = random.nextInt(clusters);
+      labels[i] = cluster;
+      for (int j = 0; j < cols; ++j) {
+        data[i][j] = centers[cluster][j] + 0.25F * (float) random.nextGaussian();
+      }
+    }
+    return data;
+  }
+
+  /**
+   * The first test to reach the large-data branch of transform at all: every other test in the
+   * repository runs below SMALL_PROBLEM_THRESHOLD, where transform computes all distances instead
+   * of walking the search graph. That gap is why the graph walk could be parallelized without any
+   * existing test noticing, and it is closed here rather than left to the next measure.
+   *
+   * <p>What this cannot assert is bit identity across thread counts, even though the walk itself
+   * guarantees it: the same call finishes with the Hogwild SGD, which is not reproducible at more
+   * than one thread. Exactness is therefore asserted directly on the walk in
+   * {@link #testInitializedNndSearchParallelMatchesSerial}, and what is checked here is that the
+   * whole branch still produces a usable embedding -- the same division as
+   * {@link #testParallelNearestNeighborDescentFindsComparableNeighbours}, whose path has no exact
+   * guarantee to assert.
+   */
+  public void testTransformOnTheLargeDataBranch() {
+    final int trainRows = 4200;   // above SMALL_PROBLEM_THRESHOLD, which is 4096
+    final int queryRows = 200;
+    final int cols = 8;
+    final int[] trainLabels = new int[trainRows];
+    final int[] queryLabels = new int[queryRows];
+    final float[][] train = clusterFixture(trainRows, cols, trainLabels, 42);
+    final float[][] query = clusterFixture(queryRows, cols, queryLabels, 4242);
+
+    final Umap umap = new Umap();
+    umap.setSeed(42);
+    umap.setThreads(4);
+    umap.setNumberNearestNeighbours(15);
+    umap.setNumberComponents(2);
+    umap.fitTransform(train);
+
+    final Matrix embedding = umap.transform(new DefaultMatrix(query));
+    assertEquals(queryRows, embedding.rows());
+    assertEquals(2, embedding.cols());
+    final float[][] transformed = new float[queryRows][2];
+    for (int i = 0; i < queryRows; ++i) {
+      transformed[i] = embedding.row(i);
+    }
+    // Measured from 0.980 to 1.000 over seeds {42, 1, 7, 123, 98765, -4444, 10101} at one and at
+    // four threads, so 0.90 has margin in both directions: well under the worst run, and far
+    // above the chance level of 0.1 that a branch which had stopped working would fall towards.
+    assertAgreementAtLeast(0.90, transformed, queryLabels);
   }
 
   /** A deterministic graph in which every vertex has nNeighbors forward edges. */
