@@ -909,6 +909,122 @@ public class UmapTest extends TestCase {
     }
   }
 
+  /**
+   * A pair of matrices wide enough that {@code xRows * yRows * columns} clears
+   * {@link PairwiseDistances#MIN_PARALLEL_WORK}. Without that, every call below would fall to
+   * the serial path and the comparison would be against itself.
+   */
+  private static Matrix[] rectangularDistanceFixture(final int xn, final int yn) {
+    final int cols = (int) (PairwiseDistances.MIN_PARALLEL_WORK / ((long) xn * yn)) + 1;
+    final Random random = new Random(1234);
+    final float[][] x = new float[xn][cols];
+    final float[][] y = new float[yn][cols];
+    for (final float[][] data : new float[][][] {x, y}) {
+      for (final float[] row : data) {
+        for (int j = 0; j < cols; ++j) {
+          row[j] = random.nextFloat();
+        }
+      }
+    }
+    return new Matrix[] {new DefaultMatrix(x), new DefaultMatrix(y)};
+  }
+
+  /**
+   * The rectangular distance matrix is split the same way and owes the same guarantee as the
+   * square one: every cell is computed by exactly one worker, so the result must be bit
+   * identical however many workers there are.
+   */
+  public void testRectangularPairwiseDistancesParallelMatchesSerial() {
+    final int xn = 41;
+    final int yn = 97;
+    final Matrix[] fixture = rectangularDistanceFixture(xn, yn);
+    final Matrix x = fixture[0];
+    final Matrix y = fixture[1];
+    final Matrix serial = PairwiseDistances.pairwiseDistances(x, y, EuclideanMetric.SINGLETON);
+    // None of these divides 41, so every worker ends on a ragged block, and 16 exceeds the
+    // number of rows a worker could usefully hold.
+    for (final int threads : new int[] {2, 3, 4, 7, 16}) {
+      final Matrix parallel = PairwiseDistances.pairwiseDistances(x, y, EuclideanMetric.SINGLETON, threads);
+      assertEquals(xn, parallel.rows());
+      assertEquals(yn, parallel.cols());
+      for (int i = 0; i < xn; ++i) {
+        for (int j = 0; j < yn; ++j) {
+          assertEquals("threads=" + threads + " at [" + i + "][" + j + "]",
+            Float.floatToRawIntBits(serial.get(i, j)), Float.floatToRawIntBits(parallel.get(i, j)));
+        }
+      }
+    }
+  }
+
+  /**
+   * Two implementations agreeing on garbage would still pass the comparison above, and a
+   * rectangular matrix has neither the symmetry nor the zero diagonal that the square test
+   * checks itself against. The square overload is an independent implementation of the same
+   * function, so measuring a matrix against itself must reproduce it cell for cell. This is
+   * what would catch a transposed index, which is the mistake this shape invites.
+   */
+  public void testRectangularPairwiseDistancesAgreesWithTheSquareOverload() {
+    final int n = 97;
+    final Matrix x = distanceFixture(n);
+    final Matrix square = PairwiseDistances.pairwiseDistances(x, EuclideanMetric.SINGLETON);
+    for (final int threads : new int[] {1, 3, 7}) {
+      final Matrix rectangular = PairwiseDistances.pairwiseDistances(x, x, EuclideanMetric.SINGLETON, threads);
+      for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+          assertEquals("threads=" + threads + " at [" + i + "][" + j + "]",
+            Float.floatToRawIntBits(square.get(i, j)), Float.floatToRawIntBits(rectangular.get(i, j)));
+        }
+      }
+    }
+  }
+
+  /**
+   * As for the square overload, the single threaded path must not merely produce the same
+   * numbers, it must not hand the work to anyone else. The floor changes no value at all, so
+   * this is the only test that can see it.
+   */
+  public void testRectangularPairwiseDistancesSingleThreadRunsOnTheCallingThread() {
+    final Matrix[] fixture = rectangularDistanceFixture(41, 97);
+    final ThreadRecordingMetric metric = new ThreadRecordingMetric();
+    PairwiseDistances.pairwiseDistances(fixture[0], fixture[1], metric, 1);
+    assertFalse("no distance was computed, the test proves nothing", metric.mCallers.isEmpty());
+    for (final Thread caller : metric.mCallers) {
+      assertSame("work was handed to another thread", Thread.currentThread(), caller);
+    }
+
+    final ThreadRecordingMetric belowThreshold = new ThreadRecordingMetric();
+    PairwiseDistances.pairwiseDistances(new DefaultMatrix(new float[32][8]),
+      new DefaultMatrix(new float[16][8]), belowThreshold, 6);
+    assertFalse("no distance was computed, the test proves nothing", belowThreshold.mCallers.isEmpty());
+    for (final Thread caller : belowThreshold.mCallers) {
+      assertSame("a pool was started for a matrix too small to repay it", Thread.currentThread(), caller);
+    }
+  }
+
+  /**
+   * Transforming a single new instance clears the work threshold easily but has one row to
+   * divide, and a pool cannot repay itself on it: measured at 0.85x against the serial loop.
+   * The worker count is capped at the rows available, which sends this case to the calling
+   * thread; that cap is the only thing protecting it, so it is asserted rather than assumed.
+   */
+  public void testRectangularPairwiseDistancesWithOneQueryRow() {
+    final Matrix[] fixture = rectangularDistanceFixture(1, 97);
+    assertTrue("fixture does not reach the parallel path",
+      (long) fixture[0].cols() * fixture[1].rows() >= PairwiseDistances.MIN_PARALLEL_WORK);
+    final ThreadRecordingMetric metric = new ThreadRecordingMetric();
+    final Matrix distances = PairwiseDistances.pairwiseDistances(fixture[0], fixture[1], metric, 16);
+    assertFalse("no distance was computed, the test proves nothing", metric.mCallers.isEmpty());
+    for (final Thread caller : metric.mCallers) {
+      assertSame("a pool was started for a single row", Thread.currentThread(), caller);
+    }
+    // The same metric, so that a difference here can only come from the split.
+    final Matrix serial = PairwiseDistances.pairwiseDistances(fixture[0], fixture[1], new ThreadRecordingMetric());
+    for (int j = 0; j < fixture[1].rows(); ++j) {
+      assertEquals("at [0][" + j + "]", Float.floatToRawIntBits(serial.get(0, j)),
+        Float.floatToRawIntBits(distances.get(0, j)));
+    }
+  }
+
   /** A deterministic graph in which every vertex has nNeighbors forward edges. */
   private static Heap candidateFixture(final int nVertices, final int nNeighbors) {
     final Heap graph = new Heap(nVertices, nNeighbors);

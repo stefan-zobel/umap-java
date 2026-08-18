@@ -1531,7 +1531,7 @@ public class Umap {
     final float[][] dists;
     final int nNeighbors = mRunNNeighbors;
     if (mSmallData) {
-      final Matrix distanceMatrix = PairwiseDistances.pairwiseDistances(instances, mRawData, mMetric);
+      final Matrix distanceMatrix = PairwiseDistances.pairwiseDistances(instances, mRawData, mMetric, mThreads);
       final int nRows = distanceMatrix.rows();
       final int nCols = distanceMatrix.cols();
       indices = new int[nRows][nNeighbors];

@@ -30,6 +30,16 @@ public class PairwiseDistances {
    * sits at n = 48 for d = 784, at n = 145 for d = 64 and at n = 384 for d = 4. The largest of
    * those three is 1.8e6, so 2e6 is at or above break even for all of them. Deliberately on
    * the conservative side; below the threshold the whole phase is under a millisecond.
+   *
+   * <p>The rectangular overload counts <code>xRows * yRows * columns</code>, the same unit, and
+   * shares this constant. It performs every evaluation it counts where the square path performs
+   * only half of them, so at an equal product it does about twice the work and repays a pool
+   * sooner: the floor is conservative for that shape rather than risky. Swept at six threads
+   * over square, wide and tall shapes, every one of them is at or above break even once the
+   * product reaches 2e6, the closest being 8 x 4000 at d = 64 with 1.27x. The one shape that
+   * would lose, a single query row against many, never reaches a pool at all because the worker
+   * count is capped at the number of rows to divide.
+   *
    * Package private so that a test can size a matrix large enough to reach the parallel path
    * at all.
    */
@@ -110,6 +120,22 @@ public class PairwiseDistances {
   }
 
   static Matrix pairwiseDistances(final Matrix x, final Matrix y, final Metric metric) {
+    return pairwiseDistances(x, y, metric, 1);
+  }
+
+  /**
+   * As {@link #pairwiseDistances(Matrix, Matrix, Metric)}, but spreading the rows of
+   * <code>x</code> over up to <code>threads</code> workers. The result is bit identical to the
+   * single threaded one for any thread count, so this is not one of the parallel paths that
+   * trade reproducibility for speed. A problem too small to repay a thread pool, and any value
+   * of 1 or less, runs on the calling thread: no pool is created and no thread is started.
+   * @param x matrix of instances
+   * @param y matrix of instances to measure against
+   * @param metric distance function
+   * @param threads maximum number of threads to use
+   * @return matrix of distances from every row of <code>x</code> to every row of <code>y</code>
+   */
+  static Matrix pairwiseDistances(final Matrix x, final Matrix y, final Metric metric, final int threads) {
     if (PrecomputedMetric.SINGLETON.equals(metric)) {
       throw new IllegalArgumentException("Cannot use this method with precomputed");
     }
@@ -118,19 +144,66 @@ public class PairwiseDistances {
     final float[][] distances = new float[xn][yn];
     final float[][] xRows = new float[xn][];
     final float[][] yRows = new float[yn][];
+    // Resolving the rows once, before any worker starts, is what keeps the loop below free of
+    // allocation and of a virtual call per distance.
     for (int i = 0; i < xn; ++i) {
       xRows[i] = x.row(i);
     }
     for (int j = 0; j < yn; ++j) {
       yRows[j] = y.row(j);
     }
-    for (int k = 0; k < xn; ++k) {
-      final float[] xk = xRows[k];
-      for (int j = 0; j < yn; ++j) {
-        distances[k][j] = metric.distance(xk, yRows[j]);
+    final int workers = (long) xn * yn * x.cols() < MIN_PARALLEL_WORK ? 1 : Math.min(threads, xn);
+    if (workers <= 1) {
+      // The whole range in one block is the loop this method has always run, on the caller's
+      // thread.
+      computeBlock(distances, xRows, yRows, metric, 0, xn);
+      return new DefaultMatrix(distances);
+    }
+    final ExecutorService executor = Executors.newFixedThreadPool(workers);
+    try {
+      final Future<?>[] futures = new Future<?>[workers];
+      for (int t = 0; t < workers; ++t) {
+        final int lo = (int) ((long) xn * t / workers);
+        final int hi = (int) ((long) xn * (t + 1) / workers);
+        futures[t] = executor.submit(() -> computeBlock(distances, xRows, yRows, metric, lo, hi));
       }
+      Utils.awaitAll(futures);
+    } finally {
+      executor.shutdown();
     }
     return new DefaultMatrix(distances);
+  }
+
+  /**
+   * Fill rows <code>lo</code> up to <code>hi</code> of the rectangular distance matrix.
+   *
+   * Contiguous blocks rather than the strides the square case needs: every row here computes
+   * the same <code>yn</code> distances, so the imbalance that striding exists to correct is
+   * absent. Measured at six threads the two are indistinguishable -- 3.49x for blocks against
+   * 3.42x for strides at 3000 x 3000, d = 784, 3.10x against 3.10x at 1000 x 3000, and 2.86x
+   * against 2.55x at d = 64 -- so blocks were chosen for the ownership argument below rather
+   * than for speed.
+   *
+   * A worker owns its rows outright and there is no mirror write, so every cell is written
+   * exactly once by exactly one worker and no cell is ever touched by a worker that does not
+   * own its row. Nothing here needs a lock or an ordering, and the result cannot depend on the
+   * worker count.
+   * @param distances matrix being filled
+   * @param xRows rows to measure from
+   * @param yRows rows to measure to
+   * @param metric distance function
+   * @param lo first row this worker owns
+   * @param hi one past the last row this worker owns
+   */
+  private static void computeBlock(final float[][] distances, final float[][] xRows, final float[][] yRows, final Metric metric, final int lo, final int hi) {
+    final int yn = yRows.length;
+    for (int k = lo; k < hi; ++k) {
+      final float[] xk = xRows[k];
+      final float[] out = distances[k];
+      for (int j = 0; j < yn; ++j) {
+        out[j] = metric.distance(xk, yRows[j]);
+      }
+    }
   }
 
 }
