@@ -226,12 +226,7 @@ public class Umap {
       // Compute indices of n nearest neighbors
       knnIndices = Utils.fastKnnIndices(instances, nNeighbors, threads);
       // Compute the nearest neighbor distances
-      knnDists = new float[knnIndices.length][nNeighbors];
-      for (int i = 0; i < knnDists.length; ++i) {
-        for (int j = 0; j < nNeighbors; ++j) {
-          knnDists[i][j] = instances.get(i, knnIndices[i][j]);
-        }
-      }
+      knnDists = Utils.submatrix(instances, knnIndices, nNeighbors);
       rpForest = Collections.emptyList();
     } else {
       boolean isAngular = metric.isAngular();
@@ -1532,21 +1527,10 @@ public class Umap {
     final int nNeighbors = mRunNNeighbors;
     if (mSmallData) {
       final Matrix distanceMatrix = PairwiseDistances.pairwiseDistances(instances, mRawData, mMetric, mThreads);
-      final int nRows = distanceMatrix.rows();
-      final int nCols = distanceMatrix.cols();
-      indices = new int[nRows][nNeighbors];
-      dists = new float[nRows][nNeighbors];
-      for (int k = 0; k < nRows; ++k) {
-        final float[] distanceRow = distanceMatrix.row(k);
-        final int[] sorted = MathUtils.argsort(Arrays.copyOf(distanceRow, nCols));
-        final int[] idxRow = indices[k];
-        final float[] distRow = dists[k];
-        for (int j = 0; j < nNeighbors; ++j) {
-          final int idx = sorted[j];
-          idxRow[j] = idx;
-          distRow[j] = distanceRow[idx];
-        }
-      }
+      // The same two steps the fit path runs, on a rectangular matrix: rows are the new
+      // instances, columns the training ones. Ascending, and the lowest index wins a tie.
+      indices = Utils.fastKnnIndices(distanceMatrix, nNeighbors, mThreads);
+      dists = Utils.submatrix(distanceMatrix, indices, nNeighbors);
     } else {
       final Heap init = NearestNeighborDescent.initialiseSearch(mRpForest, mRawData, instances, (int) (mRunNNeighbors * mTransformQueueSize), mSearch, mRandom);
       if (mSearchGraph == null) {

@@ -401,14 +401,19 @@ final class Utils {
 
   /**
    * Return a submatrix given an original matrix and the indices to keep.
-   * @param matrix Original matrix of shape <code>(nSamples, nSamples)</code>.
+   *
+   * <p>The companion of {@link #fastKnnIndices(Matrix, int, int)}: that returns which columns
+   * are nearest, this reads what their values are. Both callers need the pair, and neither the
+   * square distance matrix of a fit nor the rectangular one of a transform is treated
+   * differently here, so the columns are simply whatever was measured against.
+   * @param matrix Original matrix of shape <code>(nSamples, nColumns)</code>.
    * @param indicesCol Indices to keep of shape <code>(nSamples, nNeighbors)</code>.
    * Each row consists of the indices of the columns.
    * @param nNeighbors Number of neighbors.
    * @return array, shape <code>(nSamples, nNeighbors)</code>
    * The corresponding submatrix.
    */
-  static float[][] submatrix(Matrix matrix, int[][] indicesCol, int nNeighbors) {
+  static float[][] submatrix(final Matrix matrix, final int[][] indicesCol, final int nNeighbors) {
     final int nSamplesTransform = matrix.rows();
     final float[][] submat = new float[nSamplesTransform][nNeighbors];
     for (int i = 0; i < nSamplesTransform; ++i) {

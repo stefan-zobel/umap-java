@@ -78,7 +78,11 @@ public class UtilsTest extends TestCase {
    * construction and no rejection loop is needed, which matters because the floor is large.
    */
   private static Matrix knnFixture(final int rows) {
-    final int cols = knnFixtureCols(rows);
+    return knnFixture(rows, knnFixtureCols(rows));
+  }
+
+  /** As {@link #knnFixture(int)}, for a shape chosen by the caller. */
+  private static Matrix knnFixture(final int rows, final int cols) {
     final int count = rows * cols;
     final int[] order = MathUtils.identity(count);
     final Random random = new Random(7);
@@ -101,8 +105,8 @@ public class UtilsTest extends TestCase {
 
   /**
    * Splitting the rows over threads must reproduce the single threaded result exactly: rows
-   * are disjoint, each is copied before it is sorted, and Sort keeps no state, so there is
-   * nothing here that a worker count is entitled to change.
+   * are disjoint and a worker's selection buffers are its own, so there is nothing here that a
+   * worker count is entitled to change.
    */
   public void testFastKnnIndicesParallelMatchesSerial() {
     final int rows = 97;   // divisible by none of the worker counts below
@@ -225,6 +229,53 @@ public class UtilsTest extends TestCase {
           assertEquals("threads=" + threads + " row " + row + " neighbour " + j,
             sorted[j], m.get(row, knn[row][j]), 0.0F);
         }
+      }
+    }
+  }
+
+  /**
+   * Every other fixture here is square, but {@code Umap.transform} hands this method a
+   * rectangular matrix: rows are the new instances and columns the training ones. A confusion
+   * of rows with columns, in the worker split or in the row loop, is invisible on a square
+   * matrix, so both a wide and a tall shape are checked -- and the tall one is the case where
+   * many workers each hold short rows.
+   */
+  public void testFastKnnIndicesOnARectangularMatrix() {
+    final int k = 5;
+    final int wide = knnFixtureCols(41);
+    final int[][] shapes = {{41, wide}, {wide, 41}};
+    for (final int[] shape : shapes) {
+      final int rows = shape[0];
+      final int cols = shape[1];
+      final Matrix m = knnFixture(rows, cols);
+      final int[][] serial = Utils.fastKnnIndices(m, k);
+      for (final int threads : new int[] {1, 2, 3, 7, 16}) {
+        final int[][] parallel = Utils.fastKnnIndices(m, k, threads);
+        assertEquals(rows + "x" + cols + " threads=" + threads,
+          Arrays.deepToString(serial), Arrays.deepToString(parallel));
+      }
+      // Two implementations that agreed on garbage would still pass the loop above.
+      for (int row = 0; row < rows; ++row) {
+        assertEquals(k, serial[row].length);
+        final float[] sorted = Arrays.copyOf(m.row(row), cols);
+        Arrays.sort(sorted);
+        for (int j = 0; j < k; ++j) {
+          assertEquals(rows + "x" + cols + " row " + row + " neighbour " + j,
+            sorted[j], m.get(row, serial[row][j]), 0.0F);
+        }
+      }
+    }
+
+    // Ties in every row, so the lowest index has to win in both shapes as well.
+    for (final int[] shape : shapes) {
+      final float[][] data = new float[shape[0]][shape[1]];
+      for (final float[] row : data) {
+        for (int j = 0; j < row.length; ++j) {
+          row[j] = j % 8;
+        }
+      }
+      for (final int[] row : Utils.fastKnnIndices(new DefaultMatrix(data), k, 7)) {
+        assertEquals("[0, 8, 16, 24, 32]", Arrays.toString(row));
       }
     }
   }
