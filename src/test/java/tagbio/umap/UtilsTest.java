@@ -63,24 +63,37 @@ public class UtilsTest extends TestCase {
   }
 
   /**
-   * A matrix of distinct values, wide enough that <code>rows * columns</code> clears
-   * {@link Utils#MIN_KNN_PARALLEL_WORK}. Without that, every call below would fall to the
-   * serial path and the comparison would be against itself.
+   * Columns needed for a matrix of <code>rows</code> rows to clear
+   * {@link Utils#MIN_KNN_PARALLEL_WORK}. Derived rather than written down, so that raising the
+   * floor cannot quietly drop these tests onto the serial path where they would compare it
+   * with itself.
+   */
+  private static int knnFixtureCols(final int rows) {
+    return (int) (Utils.MIN_KNN_PARALLEL_WORK / rows) + 1;
+  }
+
+  /**
+   * A matrix of distinct values, wide enough to reach the parallel path. A shuffled
+   * permutation of the whole numbers rather than random draws: every value is distinct by
+   * construction and no rejection loop is needed, which matters because the floor is large.
    */
   private static Matrix knnFixture(final int rows) {
-    final int cols = (int) (Utils.MIN_KNN_PARALLEL_WORK / rows) + 1;
+    final int cols = knnFixtureCols(rows);
+    final int count = rows * cols;
+    final int[] order = MathUtils.identity(count);
     final Random random = new Random(7);
+    for (int i = count - 1; i > 0; --i) {
+      final int j = random.nextInt(i + 1);
+      final int t = order[i];
+      order[i] = order[j];
+      order[j] = t;
+    }
     final float[][] data = new float[rows][cols];
-    final TreeSet<Float> seen = new TreeSet<>();
-    for (final float[] row : data) {
+    for (int i = 0, k = 0; i < rows; ++i) {
       for (int j = 0; j < cols; ++j) {
         // Distinct throughout, so the k smallest of a row are an unambiguous set and no tie
         // could hide a worker that produced them in the wrong order.
-        float v;
-        do {
-          v = random.nextFloat();
-        } while (!seen.add(v));
-        row[j] = v;
+        data[i][j] = order[k++];
       }
     }
     return new DefaultMatrix(data);
@@ -133,19 +146,96 @@ public class UtilsTest extends TestCase {
    * is started. The same holds for a matrix too small to repay a pool, whatever is asked for.
    */
   public void testFastKnnIndicesSingleThreadRunsOnTheCallingThread() {
-    final ThreadRecordingMatrix big = new ThreadRecordingMatrix(new float[128][128]);
+    final int rows = 64;
+    final ThreadRecordingMatrix big = new ThreadRecordingMatrix(new float[rows][knnFixtureCols(rows)]);
     Utils.fastKnnIndices(big, 3, 1);
     assertFalse("no row was read, the test proves nothing", big.mCallers.isEmpty());
     for (final Thread caller : big.mCallers) {
       assertSame("work was handed to another thread", Thread.currentThread(), caller);
     }
 
-    final ThreadRecordingMatrix small = new ThreadRecordingMatrix(new float[16][16]);
+    // Sized from the floor rather than written down, so it stays below it however it moves.
+    final ThreadRecordingMatrix small = new ThreadRecordingMatrix(new float[rows][knnFixtureCols(rows) / 2]);
     Utils.fastKnnIndices(small, 3, 6);
     assertFalse("no row was read, the test proves nothing", small.mCallers.isEmpty());
     for (final Thread caller : small.mCallers) {
       assertSame("a pool was started for a matrix too small to repay it", Thread.currentThread(), caller);
     }
+  }
+
+  /**
+   * Among points at an equal distance the lowest index wins. That is a guarantee of the
+   * method, not an accident of how the values happen to be laid out, so it is pinned here:
+   * before the k smallest were selected in one pass an unstable quicksort decided this and the
+   * answer depended on the sort.
+   */
+  public void testFastKnnIndicesBreaksTiesByLowestIndex() {
+    final Matrix m = new DefaultMatrix(new float[][] {
+      {5, 1, 1, 1, 5, 1},   // the three smallest are the ones at 1, 2 and 3
+      {0, 0, 0, 9, 9, 9},
+      {3, 3, 3, 3, 3, 3},   // every column is tied, so the first three win
+    });
+    assertEquals("[[1, 2, 3], [0, 1, 2], [0, 1, 2]]", Arrays.deepToString(Utils.fastKnnIndices(m, 3)));
+
+    // The same on the parallel path, over a matrix where every value repeats every eighth
+    // column: the k smallest are the lowest indices carrying the smallest value.
+    final int rows = 97;
+    final int cols = knnFixtureCols(rows);
+    final float[][] data = new float[rows][cols];
+    for (final float[] row : data) {
+      for (int j = 0; j < cols; ++j) {
+        row[j] = j % 8;
+      }
+    }
+    final Matrix tied = new DefaultMatrix(data);
+    for (final int threads : new int[] {1, 2, 3, 4, 7, 16}) {
+      final int[][] knn = Utils.fastKnnIndices(tied, 5, threads);
+      for (int row = 0; row < rows; ++row) {
+        assertEquals("threads=" + threads + " row " + row,
+          "[0, 8, 16, 24, 32]", Arrays.toString(knn[row]));
+      }
+    }
+  }
+
+  /**
+   * Whichever equidistant point is chosen, the k distances carried back have to be the k
+   * smallest of the row. This is the property that makes the tie rule harmless downstream, so
+   * it is asserted directly rather than inferred from the embedding tests.
+   */
+  public void testFastKnnIndicesReturnsTheKSmallestDistances() {
+    final int rows = 97;
+    final int cols = knnFixtureCols(rows);
+    final int k = 15;
+    final Random random = new Random(11);
+    final float[][] data = new float[rows][cols];
+    for (final float[] row : data) {
+      for (int j = 0; j < cols; ++j) {
+        // A small range over many columns, so ties at the k-th distance are the rule here
+        // rather than the exception.
+        row[j] = random.nextInt(20);
+      }
+    }
+    final Matrix m = new DefaultMatrix(data);
+    for (final int threads : new int[] {1, 4, 7}) {
+      final int[][] knn = Utils.fastKnnIndices(m, k, threads);
+      for (int row = 0; row < rows; ++row) {
+        final float[] sorted = Arrays.copyOf(data[row], cols);
+        Arrays.sort(sorted);
+        for (int j = 0; j < k; ++j) {
+          assertEquals("threads=" + threads + " row " + row + " neighbour " + j,
+            sorted[j], m.get(row, knn[row][j]), 0.0F);
+        }
+      }
+    }
+  }
+
+  /**
+   * Asking for more neighbours than there are columns pads with zeros, which is what taking a
+   * prefix of a full sort used to do. Nothing else covers it.
+   */
+  public void testFastKnnIndicesWithMoreNeighboursThanColumns() {
+    final Matrix m = new DefaultMatrix(new float[][] {{7, 4}, {1, 6}});
+    assertEquals("[[1, 0, 0, 0, 0], [0, 1, 0, 0, 0]]", Arrays.deepToString(Utils.fastKnnIndices(m, 5)));
   }
 
   public void testL2Norm() {
