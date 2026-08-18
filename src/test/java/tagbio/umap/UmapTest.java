@@ -16,6 +16,7 @@ import java.util.concurrent.Executors;
 
 import junit.framework.TestCase;
 import tagbio.umap.metric.EuclideanMetric;
+import tagbio.umap.metric.MinkowskiMetric;
 import tagbio.umap.metric.PrecomputedMetric;
 
 /**
@@ -818,6 +819,94 @@ public class UmapTest extends TestCase {
     // Ten classes, so chance is 0.1. Measured over ten seeds: 0.9726 to 0.9784 at four
     // threads against 0.9708 to 0.9792 at one, so the races cost nothing detectable here.
     assertAgreementAtLeast(0.94, matrix, data.getSampleClassIndex());
+  }
+
+  /**
+   * A matrix wide enough that {@code rows * rows * columns} clears
+   * {@link PairwiseDistances#MIN_PARALLEL_WORK}. Without that, every call below would fall to
+   * the serial path and the comparison would be against itself.
+   */
+  private static Matrix distanceFixture(final int rows) {
+    final int cols = (int) (PairwiseDistances.MIN_PARALLEL_WORK / ((long) rows * rows)) + 1;
+    final Random random = new Random(99);
+    final float[][] data = new float[rows][cols];
+    for (final float[] row : data) {
+      for (int j = 0; j < cols; ++j) {
+        row[j] = random.nextFloat();
+      }
+    }
+    return new DefaultMatrix(data);
+  }
+
+  /**
+   * Splitting the distance matrix over threads is not one of the parallel paths that trade
+   * reproducibility for speed: every cell is computed by exactly one worker, so the result
+   * must be bit identical however many workers there are. Raw bits rather than a tolerance,
+   * because anything short of equality here is a defect.
+   */
+  public void testPairwiseDistancesParallelMatchesSerial() {
+    final int n = 97;
+    final Matrix x = distanceFixture(n);
+    final Matrix serial = PairwiseDistances.pairwiseDistances(x, EuclideanMetric.SINGLETON);
+    // None of these divides 97, so every worker ends on a ragged stride, and 16 exceeds the
+    // number of rows a worker could usefully hold.
+    for (final int threads : new int[] {2, 3, 4, 7, 16}) {
+      final Matrix parallel = PairwiseDistances.pairwiseDistances(x, EuclideanMetric.SINGLETON, threads);
+      for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+          assertEquals("threads=" + threads + " at [" + i + "][" + j + "]",
+            Float.floatToRawIntBits(serial.get(i, j)), Float.floatToRawIntBits(parallel.get(i, j)));
+        }
+      }
+    }
+    // Two implementations that agreed on garbage would still pass the loop above.
+    for (int i = 0; i < n; ++i) {
+      assertEquals("diagonal", 0.0F, serial.get(i, i), 0.0F);
+      for (int j = 0; j < i; ++j) {
+        assertEquals("not symmetric", serial.get(i, j), serial.get(j, i), 0.0F);
+        assertTrue("distinct points at zero distance", serial.get(i, j) > 0);
+      }
+    }
+  }
+
+  /** Records who computed each distance, so that a claim about threads can be checked directly. */
+  private static final class ThreadRecordingMetric extends MinkowskiMetric {
+    private final List<Thread> mCallers = new ArrayList<>();
+
+    private ThreadRecordingMetric() {
+      super(2.0);
+    }
+
+    @Override
+    public float distance(final float[] x, final float[] y) {
+      synchronized (mCallers) {
+        mCallers.add(Thread.currentThread());
+      }
+      return super.distance(x, y);
+    }
+  }
+
+  /**
+   * The single threaded path must not merely produce the same numbers, it must not hand the
+   * work to anyone else: callers rely on threads = 1 meaning no pool is created and no thread
+   * is started. The same holds for a matrix too small to repay a pool, whatever is asked for.
+   * Checking who computed the distances proves both directly, without depending on timing or
+   * on counting live threads.
+   */
+  public void testPairwiseDistancesSingleThreadRunsOnTheCallingThread() {
+    final ThreadRecordingMetric metric = new ThreadRecordingMetric();
+    PairwiseDistances.pairwiseDistances(distanceFixture(97), metric, 1);
+    assertFalse("no distance was computed, the test proves nothing", metric.mCallers.isEmpty());
+    for (final Thread caller : metric.mCallers) {
+      assertSame("work was handed to another thread", Thread.currentThread(), caller);
+    }
+
+    final ThreadRecordingMetric belowThreshold = new ThreadRecordingMetric();
+    PairwiseDistances.pairwiseDistances(new DefaultMatrix(new float[32][8]), belowThreshold, 6);
+    assertFalse("no distance was computed, the test proves nothing", belowThreshold.mCallers.isEmpty());
+    for (final Thread caller : belowThreshold.mCallers) {
+      assertSame("a pool was started for a matrix too small to repay it", Thread.currentThread(), caller);
+    }
   }
 
   /** A deterministic graph in which every vertex has nNeighbors forward edges. */

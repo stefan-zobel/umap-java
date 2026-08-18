@@ -205,7 +205,7 @@ public final class PhaseTimingBenchmark {
     stop("findAbParams");
 
     start();
-    final Matrix dmat = PairwiseDistances.pairwiseDistances(instances, metric);
+    final Matrix dmat = PairwiseDistances.pairwiseDistances(instances, metric, threads);
     stop("pairwiseDistances");
 
     // Umap.nearestNeighbors with PrecomputedMetric: fastKnnIndices plus a gather.

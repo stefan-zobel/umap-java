@@ -1273,13 +1273,15 @@ public class Umap {
 
   /**
    * Set the maximum number of threads to use (default 1). This governs the random projection
-   * forest, the nearest neighbor descent and the layout optimization alike.
+   * forest, the nearest neighbor descent and the layout optimization alike, and on inputs
+   * small enough to be handled by exhaustive search it also governs the distance matrix.
    *
    * Note that any value above 1 makes the result nondeterministic: the nearest neighbor
    * descent visits candidates in an order that depends on thread scheduling, and the layout
    * optimization runs Hogwild style, letting concurrent updates to the same embedding row
    * overwrite one another. Two runs with the same random seed will therefore differ. Set 1 to
-   * keep a run reproducible.
+   * keep a run reproducible. The distance matrix is the exception: it is computed over
+   * disjoint rows and is bit identical however many threads compute it.
    * @param threads number of threads
    * @return this Umap object
    */
@@ -1367,7 +1369,7 @@ public class Umap {
     // Handle small cases efficiently by computing all distances
     if (instances.rows() < SMALL_PROBLEM_THRESHOLD) {
       mSmallData = true;
-      final Matrix dmat = PairwiseDistances.pairwiseDistances(instances, mMetric);
+      final Matrix dmat = PairwiseDistances.pairwiseDistances(instances, mMetric, mThreads);
       mGraph = fuzzySimplicialSet(dmat, mRunNNeighbors, mRandom, PrecomputedMetric.SINGLETON, null, null, mAngularRpForest, mSetOpMixRatio, mLocalConnectivity, mThreads, mVerbose);
     } else {
       mSmallData = false;
@@ -1402,7 +1404,7 @@ public class Umap {
         final Matrix targetGraph;
         // Handle the small case as precomputed as before
         if (y.length < SMALL_PROBLEM_THRESHOLD) {
-          final Matrix ydmat = PairwiseDistances.pairwiseDistances(MathUtils.promoteTranspose(y), mTargetMetric);
+          final Matrix ydmat = PairwiseDistances.pairwiseDistances(MathUtils.promoteTranspose(y), mTargetMetric, mThreads);
           targetGraph = fuzzySimplicialSet(ydmat, targetNNeighbors, mRandom, PrecomputedMetric.SINGLETON, null, null, false, 1, 1, mThreads, false);
         } else {
           // Standard case
