@@ -1137,7 +1137,7 @@ public class UmapTest extends TestCase {
       // The walk passes the query row as the second argument; a DefaultMatrix hands out the
       // backing array, so identity is enough to tell the rows apart.
       synchronized (mOwners) {
-        mOwners.computeIfAbsent(y, k -> new HashSet<>()).add(Thread.currentThread());
+        mOwners.computeIfAbsent(y, _ -> new HashSet<>()).add(Thread.currentThread());
       }
       return super.distance(x, y);
     }
@@ -1227,6 +1227,170 @@ public class UmapTest extends TestCase {
     final NearestNeighborSearch search = new NearestNeighborSearch(metric);
     search.initializedNndSearch((Matrix) fixture[0], (SearchGraph) fixture[2],
       searchInitialization(search, (Matrix) fixture[0], (Matrix) fixture[1]), (Matrix) fixture[1], 16);
+    assertFalse("no distance was computed, the test proves nothing", metric.mCallers.isEmpty());
+    for (final Thread caller : metric.mCallers) {
+      assertSame("a pool was started for a single query row", Thread.currentThread(), caller);
+    }
+  }
+
+  /** Summed candidate distance of a heap, the quality measure of a search initialization. */
+  private static double heapWeightSum(final Heap heap, final int rows, final int width) {
+    double sum = 0;
+    for (int i = 0; i < rows; ++i) {
+      for (int j = 0; j < width; ++j) {
+        assertTrue("row " + i + " slot " + j + " was never filled", heap.index(i, j) >= 0);
+        sum += heap.weights()[i][j];
+      }
+    }
+    return sum;
+  }
+
+  /**
+   * Unlike the walk, the search initialization cannot be exact above one thread: every worker
+   * needs its own random stream, and the tree descent draws from it whenever a query point sits on
+   * a hyperplane. So what is asserted is what the parallel descent's test asserts about the same
+   * kind of trade -- that the split finds candidates of the same quality, not the same candidates.
+   *
+   * <p>The bound is deliberately wide. Measured over the sizes of the floor sweep the ratio stayed
+   * within 0.8 % of one and was usually within 0.05 %, so 5 % is meant to catch a split that loses
+   * candidates, not to pin a number a different random stream is entitled to move.
+   */
+  public void testInitialiseSearchParallelFindsComparableCandidates() {
+    final int trainRows = 600;
+    final int cols = 12;
+    final int queryRows = (int) (NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK / ((long) SEARCH_HEAP_WIDTH * cols)) + 26;
+    final Object[] fixture = searchFixture(trainRows, queryRows, cols);
+    final Matrix train = (Matrix) fixture[0];
+    final Matrix query = (Matrix) fixture[1];
+    final NearestNeighborSearch search = new NearestNeighborSearch(EuclideanMetric.SINGLETON);
+    final List<FlatTree> forest = RandomProjectionTree.makeForest(train, 6, 5, new Random(1234), false, 1);
+
+    // With a forest and without one: a model whose metric has no tree support hands null here, and
+    // then randomInit is the whole method.
+    for (final List<FlatTree> trees : Arrays.asList(forest, null)) {
+      final Heap serial = NearestNeighborDescent.initialiseSearch(trees, train, query, SEARCH_HEAP_WIDTH, search, new Random(7), 1);
+      final double serialSum = heapWeightSum(serial, queryRows, SEARCH_HEAP_WIDTH);
+      for (final int threads : new int[] {2, 3, 7, 16}) {
+        final String where = "threads=" + threads + " forest=" + (trees != null);
+        final Heap parallel = NearestNeighborDescent.initialiseSearch(trees, train, query, SEARCH_HEAP_WIDTH, search, new Random(7), threads);
+        final double ratio = heapWeightSum(parallel, queryRows, SEARCH_HEAP_WIDTH) / serialSum;
+        assertTrue(where + " found much worse candidates: ratio " + ratio, ratio < 1.05);
+        assertTrue(where + " found implausibly better candidates: ratio " + ratio, ratio > 0.95);
+        for (int i = 0; i < queryRows; ++i) {
+          for (int j = 0; j < SEARCH_HEAP_WIDTH; ++j) {
+            assertTrue(where + " index outside the data at [" + i + "][" + j + "]", parallel.index(i, j) < trainRows);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * That every query row is seeded by exactly one worker, asserted directly.
+   *
+   * <p>Worth having here in a way it was not for the walk. Both splits can go wrong by handing a
+   * row to two workers or by seeding rows outside a worker's range, but a second walk of a row
+   * computes nothing at all, whereas a second seeding computes a full set of distances again. So
+   * where {@link #testInitializedNndSearchDividesTheQueryRowsExactlyOnce} cannot see an overlap,
+   * this one can, and the mutation check confirms it: an overlap and a `treeInit` that ignores its
+   * row range both survive every other test in this class, because both merely add candidates to a
+   * heap whose {@link Heap#push} locks the row anyway. What they cost is work, not correctness,
+   * and this is the test that notices.
+   */
+  public void testInitialiseSearchDividesTheQueryRowsExactlyOnce() {
+    final int cols = 12;
+    final int queryRows = (int) (NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK / ((long) SEARCH_HEAP_WIDTH * cols)) + 26;
+    final Object[] fixture = searchFixture(600, queryRows, cols);
+    final Matrix train = (Matrix) fixture[0];
+    final Matrix query = (Matrix) fixture[1];
+    final RowOwnershipMetric metric = new RowOwnershipMetric();
+    final NearestNeighborSearch search = new NearestNeighborSearch(metric);
+    final List<FlatTree> forest = RandomProjectionTree.makeForest(train, 6, 5, new Random(1234), false, 1);
+    NearestNeighborDescent.initialiseSearch(forest, train, query, SEARCH_HEAP_WIDTH, search, new Random(7), 7);
+
+    assertEquals("some query row was never seeded", queryRows, metric.mOwners.size());
+    final Set<Thread> workers = new HashSet<>();
+    for (final Map.Entry<float[], Set<Thread>> entry : metric.mOwners.entrySet()) {
+      assertEquals("a query row was seeded by " + entry.getValue().size() + " threads", 1, entry.getValue().size());
+      workers.addAll(entry.getValue());
+    }
+    // Without this the assertion above would also hold for a run that never left one thread.
+    assertTrue("the rows were never actually divided, the test proves nothing", workers.size() > 1);
+  }
+
+  /**
+   * The one exact guarantee this method still owes: at a single thread it is the loop it has
+   * always been, drawing from the caller's random in the caller's order. Nothing else can catch a
+   * refactor that consumes the stream differently -- a comparison against the parallel path
+   * cannot, because that one is allowed to differ.
+   */
+  public void testInitialiseSearchAtOneThreadIsUnchanged() {
+    final int cols = 12;
+    final Object[] fixture = searchFixture(600, 40, cols);
+    final Matrix train = (Matrix) fixture[0];
+    final Matrix query = (Matrix) fixture[1];
+    final NearestNeighborSearch search = new NearestNeighborSearch(EuclideanMetric.SINGLETON);
+    final List<FlatTree> forest = RandomProjectionTree.makeForest(train, 6, 5, new Random(1234), false, 1);
+
+    // The composition the method has always performed, spelled out here so that it has something
+    // independent to be equal to.
+    final Heap expected = new Heap(query.rows(), SEARCH_HEAP_WIDTH);
+    final Random random = new Random(7);
+    search.randomInit(SEARCH_HEAP_WIDTH, train, query, expected, random);
+    for (final FlatTree tree : forest) {
+      search.treeInit(tree, train, query, expected, random);
+    }
+
+    final Heap actual = NearestNeighborDescent.initialiseSearch(forest, train, query, SEARCH_HEAP_WIDTH, search, new Random(7), 1);
+    for (int i = 0; i < query.rows(); ++i) {
+      for (int j = 0; j < SEARCH_HEAP_WIDTH; ++j) {
+        assertEquals("index at [" + i + "][" + j + "]", expected.index(i, j), actual.index(i, j));
+        assertEquals("weight at [" + i + "][" + j + "]",
+          Float.floatToRawIntBits(expected.weights()[i][j]), Float.floatToRawIntBits(actual.weights()[i][j]));
+      }
+    }
+  }
+
+  /**
+   * As for the walk, the floor and the single threaded path change no value at all, so only the
+   * question of who computed the distances can see them.
+   */
+  public void testInitialiseSearchSingleThreadRunsOnTheCallingThread() {
+    final int cols = 12;
+    final int queryRows = (int) (NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK / ((long) SEARCH_HEAP_WIDTH * cols)) + 26;
+    final Object[] fixture = searchFixture(600, queryRows, cols);
+    final ThreadRecordingMetric metric = new ThreadRecordingMetric();
+    final NearestNeighborSearch single = new NearestNeighborSearch(metric);
+    NearestNeighborDescent.initialiseSearch(null, (Matrix) fixture[0], (Matrix) fixture[1], SEARCH_HEAP_WIDTH, single, new Random(7), 1);
+    assertFalse("no distance was computed, the test proves nothing", metric.mCallers.isEmpty());
+    for (final Thread caller : metric.mCallers) {
+      assertSame("work was handed to another thread", Thread.currentThread(), caller);
+    }
+
+    final Object[] small = searchFixture(600, 8, cols);
+    assertTrue("fixture is not below the floor",
+      8L * SEARCH_HEAP_WIDTH * cols < NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK);
+    final ThreadRecordingMetric belowThreshold = new ThreadRecordingMetric();
+    final NearestNeighborSearch tiny = new NearestNeighborSearch(belowThreshold);
+    NearestNeighborDescent.initialiseSearch(null, (Matrix) small[0], (Matrix) small[1], SEARCH_HEAP_WIDTH, tiny, new Random(7), 6);
+    assertFalse("no distance was computed, the test proves nothing", belowThreshold.mCallers.isEmpty());
+    for (final Thread caller : belowThreshold.mCallers) {
+      assertSame("a pool was started for a problem too small to repay it", Thread.currentThread(), caller);
+    }
+  }
+
+  /**
+   * One new instance clears the work threshold on a wide enough model but has one row to divide,
+   * and the worker cap is the only thing that keeps a pool away from it.
+   */
+  public void testInitialiseSearchWithOneQueryRow() {
+    final int cols = 4096;
+    final Object[] fixture = searchFixture(200, 1, cols);
+    assertTrue("fixture does not reach the parallel path",
+      (long) SEARCH_HEAP_WIDTH * cols >= NearestNeighborSearch.MIN_SEARCH_PARALLEL_WORK);
+    final ThreadRecordingMetric metric = new ThreadRecordingMetric();
+    final NearestNeighborSearch search = new NearestNeighborSearch(metric);
+    NearestNeighborDescent.initialiseSearch(null, (Matrix) fixture[0], (Matrix) fixture[1], SEARCH_HEAP_WIDTH, search, new Random(7), 16);
     assertFalse("no distance was computed, the test proves nothing", metric.mCallers.isEmpty());
     for (final Thread caller : metric.mCallers) {
       assertSame("a pool was started for a single query row", Thread.currentThread(), caller);

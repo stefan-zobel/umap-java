@@ -42,6 +42,15 @@ class NearestNeighborSearch {
    * Both are within what a pool costs, and the low dimensions are where a walk is cheapest in
    * absolute terms -- 14 ms per 1000 rows at d = 8 -- so they are the corner least worth chasing.
    *
+   * <p>{@link NearestNeighborDescent#initialiseSearch} shares this constant. It is a different
+   * loop, but it is one pass per query row over a heap of the same width against a model of the
+   * same dimension, and its sweep lands in the same place: break even at 4 to 32 query rows at a
+   * width of 60 and 8 to 128 at a width of 20, a product span of 15 000 to 376 000 against this
+   * loop's 13 000 to 141 000. At 65536 the worst case there is 1.9 ms forgone at d = 784 with a
+   * narrow heap, and at most 0.1 ms wasted anywhere -- the same trade this constant already makes
+   * for the walk. A second constant within noise of this one would only invite the two to drift
+   * apart.
+   *
    * Package private so that a test can size a query matrix large enough to reach the parallel
    * path at all.
    */
@@ -54,7 +63,20 @@ class NearestNeighborSearch {
   }
 
   void treeInit(final FlatTree tree, final Matrix data, final Matrix queryPoints, final Heap heap, final Random random) {
-    for (int i = 0; i < queryPoints.rows(); ++i) {
+    treeInit(tree, data, queryPoints, heap, random, 0, queryPoints.rows());
+  }
+
+  /**
+   * Seed the heap rows <code>[lo, hi)</code> from the leaf each query row descends to.
+   *
+   * <p>Rows are independent: each writes only into its own heap row, {@link FlatTree} is immutable
+   * and the tree descent only reads it. The <code>random</code> is the one thing a caller must not
+   * share between threads -- {@link FlatTree#searchFlatTree} draws from it whenever a point sits
+   * on a hyperplane -- which is why {@link NearestNeighborDescent#initialiseSearch} hands each
+   * worker its own and why that method is not exact above one thread.
+   */
+  void treeInit(final FlatTree tree, final Matrix data, final Matrix queryPoints, final Heap heap, final Random random, final int lo, final int hi) {
+    for (int i = lo; i < hi; ++i) {
       final int[] indices = tree.searchFlatTree(queryPoints.row(i), random);
       for (final int index : indices) {
         if (index < 0) {
@@ -67,7 +89,16 @@ class NearestNeighborSearch {
   }
 
   void randomInit(final int nNeighbors, final Matrix data, final Matrix queryPoints, final Heap heap, final Random random) {
-    for (int i = 0; i < queryPoints.rows(); ++i) {
+    randomInit(nNeighbors, data, queryPoints, heap, random, 0, queryPoints.rows());
+  }
+
+  /**
+   * Seed the heap rows <code>[lo, hi)</code> with <code>nNeighbors</code> randomly chosen
+   * instances each. As {@link #treeInit(FlatTree, Matrix, Matrix, Heap, Random, int, int)}: rows
+   * are independent and only the <code>random</code> must not be shared.
+   */
+  void randomInit(final int nNeighbors, final Matrix data, final Matrix queryPoints, final Heap heap, final Random random, final int lo, final int hi) {
+    for (int i = lo; i < hi; ++i) {
       final int[] indices = Utils.rejectionSample(nNeighbors, data.rows(), random);
       for (final int index : indices) {
         final float d = mDist.distance(data.row(index), queryPoints.row(i));

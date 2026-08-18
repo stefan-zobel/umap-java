@@ -1271,12 +1271,20 @@ public class Umap {
    * forest, the nearest neighbor descent and the layout optimization alike, and on inputs
    * small enough to be handled by exhaustive search it also governs the distance matrix.
    *
+   * It governs {@link #transform} as well, both branches of it: the distance matrix and the
+   * neighbour selection on small models, the search initialization and the graph walk on large
+   * ones.
+   *
    * Note that any value above 1 makes the result nondeterministic: the nearest neighbor
-   * descent visits candidates in an order that depends on thread scheduling, and the layout
-   * optimization runs Hogwild style, letting concurrent updates to the same embedding row
-   * overwrite one another. Two runs with the same random seed will therefore differ. Set 1 to
-   * keep a run reproducible. The distance matrix is the exception: it is computed over
-   * disjoint rows and is bit identical however many threads compute it.
+   * descent visits candidates in an order that depends on thread scheduling, the search
+   * initialization of a transform gives each worker its own random stream and so reaches
+   * different leaves of the projection trees, and the layout optimization runs Hogwild style,
+   * letting concurrent updates to the same embedding row overwrite one another. Two runs with the
+   * same random seed will therefore differ. Set 1 to keep a run reproducible.
+   *
+   * The exceptions are the parts that divide disjoint rows and draw no random numbers: the
+   * distance matrix, the neighbour selection, and the graph walk of a transform are each bit
+   * identical however many threads compute them.
    * @param threads number of threads
    * @return this Umap object
    */
@@ -1532,7 +1540,7 @@ public class Umap {
       indices = Utils.fastKnnIndices(distanceMatrix, nNeighbors, mThreads);
       dists = Utils.submatrix(distanceMatrix, indices, nNeighbors);
     } else {
-      final Heap init = NearestNeighborDescent.initialiseSearch(mRpForest, mRawData, instances, (int) (mRunNNeighbors * mTransformQueueSize), mSearch, mRandom);
+      final Heap init = NearestNeighborDescent.initialiseSearch(mRpForest, mRawData, instances, (int) (mRunNNeighbors * mTransformQueueSize), mSearch, mRandom, mThreads);
       if (mSearchGraph == null) {
         mSearchGraph = new SearchGraph(mRawData.rows());
         for (int k = 0; k < mKnnIndices.length; ++k) {
